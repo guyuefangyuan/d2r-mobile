@@ -4,6 +4,7 @@
 #include "d2r_hud_android.h"
 #include "d2r_world_overlay_android.h"
 #include "d2r_custom_android.h"
+#include "d2r_map_reveal.h"
 #include "d2r_touch_flow_android.h"
 #include "d2r_touch_shell_android.h"
 #include "input_backend.h"
@@ -17,9 +18,17 @@
 #include "../ios/Sources/dm_touch_controls.h"
 #include <stdatomic.h>
 #include <string.h>
+#include <math.h>
 
 static int attached;
 static uint8_t *main_base;
+/* 局外直接复用 iOS 的鼠标消息队列，不把同一触点再送进游戏触摸屏。
+ * Front-end taps use the iOS mouse-message queue without duplicating touchscreen input. */
+int dm_android_d2r_frontend_touch(int phase,float x,float y) {
+    if(!attached || phase<0 || phase>3 || !isfinite(x) || !isfinite(y))return 0;
+    if(phase!=3 && dm_uiscreen_ingame())return 0;
+    dm_ui_touch(phase,x,y);return 1;
+}
 extern int dm_android_skill_flow_event(dm_tc_state *,uint32_t,int,int,double) __attribute__((weak));
 extern void dm_android_skill_flow_pump(void) __attribute__((weak));
 extern void dm_android_d2r_touch_shell_pump(void) __attribute__((weak));
@@ -52,6 +61,7 @@ int dm_android_d2r_ui_attach(module_t *main) {
         die("Android UI bridge does not include desktop teleport/screenshot diagnostics");
     if(!dm_android_custom_attach(main))return 0;
     main_base=main->base;attached=1;
+    dm_android_map_attach(main);
     dm_android_touch_bind_flow(title_touch_flow,NULL);
     LOG("ANDROID_D2R_UI_BRIDGE attached=1 source=shared-ios widget_tree=1 events=1 input_filter=1");
     return 1;
@@ -108,6 +118,7 @@ void dm_android_d2r_ui_pump(dm_android_touch_game_state *state) {
     { void dm_padmode_request(int);dm_padmode_request(dm_android_input_controller_mode()); }
     if(dm_android_d2r_touch_shell_pump)dm_android_d2r_touch_shell_pump();
     dm_world_pump();
+    dm_android_map_pump();
     dm_ui_mouse_pump();
     dm_android_d2r_touch_flow_pump();
     float x=0,y=0;

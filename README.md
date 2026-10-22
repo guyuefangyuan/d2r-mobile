@@ -23,23 +23,44 @@ Android support remains experimental; see the separate validation scope below.
 
 The iOS version is polished for daily play, from your first character all the way through the endgame. Android is still under development.
 
-Platforms: Android (experimental, arm64-v8a, API 29+, Vulkan) · iPhone / iPad (iOS 26 and later; iOS 18 – 25 with the older-API build) · Mac (Apple silicon, macOS 26 or later; macOS 15 – 25 with the older-API build) · Apple TV 4K (3rd generation, A15; community port, developer preview) · Game version: Switch release with Reign of the Warlock, 1.0.34.0 (corresponds to PC version 3.3.94012) · English / 中文 · License: MIT · **Bring your own game files**
+Platforms: Android (experimental, arm64-v8a, API 29+, Vulkan) · iPhone / iPad (iOS 26 and later; iOS 18 – 25 with the older-API build) · Mac (Apple silicon, macOS 26 or later; macOS 15 – 25 with the older-API build) · Apple TV 4K (3rd generation, A15; community port, developer preview) · Game version: Switch release with Reign of the Warlock, 1.0.34.0 (corresponds to PC version 3.3.94012) · English / 中文 / Español / Русский · License: MIT · **Bring your own game files**
 
-中文: [README.zh-CN.md](README.zh-CN.md)
+中文: [README.zh-CN.md](README.zh-CN.md) · Español: [README.es.md](README.es.md)
 
-D2R Android work is consolidated on `main`. The offline installer remains
-pinned to build **91738**; build **94012** has a separate diagnostic package and
-explicitly enabled, version-checked private adapters. Android controller input,
+D2R Android work is consolidated on `main`. The current **1.1.0 / game 94012**
+supports a matched offline APK and resource package. The older 91738 installer
+is a separate release path; its resources are not interchangeable. Android controller input,
 transactional saves and the iOS touch/UI bridge have different validation scopes;
 see the [parity record](docs/ANDROID_IOS_PARITY.md) and
 [main integration notes](docs/ANDROID_MAIN_INTEGRATION_2026-10-19.zh-CN.md).
-The integrated main build still needs original-game acceptance testing.
 
 Zelda: Echoes of Wisdom port work has stopped and is not scheduled. Its
 title-specific Android entry points, probes, profiles and porting tools have
 been removed. Gameplay measurements below refer to D2R.
 
 ## Android support — experimental
+
+Main-branch HUD update (2026-10-21): floating system/mode and extra menu controls are removed; touch and controller input switch automatically. Open **Options → Custom → Android settings** for platform settings and the optional FPS display, hidden by default. See the [HUD and Custom settings notes](docs/ANDROID_HUD_2026-10-21.zh-CN.md).
+
+### 1.1.0 update · 2026-10-20
+
+These changes cover the **October 18–20** mainline work, compared with the earlier 91738 offline release:
+
+- **Reign of the Warlock support:** the Android offline package now targets game 94012 with the expansion. Supply your own matching, legitimately owned game files.
+- **Expanded touch controls and HUD:** integrate shared touch/panel handling, improving movement, skill aiming and binding, inventory drag/drop, skill icons, potions and character status. Touch takeover and menu transitions are improved. Movement, the main skill HUD and menu/options taps have device evidence; skill binding, trading and other detailed interactions still need gameplay acceptance tests.
+- **Expanded gamepad input:** buttons, twin sticks and triggers, with touch/gamepad switching. Physical-controller compatibility and reconnection remain untested.
+- **Performance, graphics and compatibility:** add automatic and balanced quality modes alongside original/performance modes. Automatic mode can lower 3D scale when frames fall behind. Improve rendering/cache paths and supported-device upscaling, fix identified Qualcomm system-driver rendering artifacts, and recommend a compatible driver with startup-failure fallback.
+- **Save and background recovery:** add background saves, transactional persistence and failure feedback. Corresponding test builds have paused-background-save and cold-load evidence. Screen locking and sustained sessions still need validation.
+- **New launcher and offline setup:** clearer import/resource status, confirmed cancellation, reuse of verified files on retry, and driver/installed-MOD selection before launch. Use the matched `D2R-Mobile.apk` and `D2R-Offline-94012.d2rpack` (about 9.25 GB) without extracting it. Allow about 20 GB for initial setup; update in place to retain data.
+- **MODs and maps:** load adapted, validated, version-matched MOD packages with separate save directories; reveal the **current map** with one action. PC MODs need conversion and adaptation.
+
+**Validation:** different builds within this period have character-selection performance comparisons and on-device touch, panel and save evidence; these do not establish full acceptance of the final 1.1.0 APK. Delivery checks cover native builds, APK signature/alignment/payloads, the entire resource package and code regressions. A debuggable APK of this revision was installed over the previous release on HONOR 60 Pro, verifying the ready launcher and expanded settings. **Gameplay rendering, overall FPS and sustained stability of the final integrated package still need device tests.** Native BC passthrough and yield backoff remain disabled experiments; the standard package excludes the QA console.
+
+See the [release notes](docs/ANDROID_RELEASE_1_1_0.zh-CN.md), [three-day review](docs/ANDROID_UPDATE_REVIEW_2026-10-18_20.zh-CN.md), [optimization port](docs/ANDROID_INTEGRATION_PORT_2026-10-20.zh-CN.md), [launcher](docs/ANDROID_LAUNCHER_2026-10-20.zh-CN.md), [MOD/map guide](docs/ANDROID_MODS_2026-10-20.zh-CN.md) and [optional QA mode](docs/ANDROID_DEBUG_MODE_2026-10-20.zh-CN.md). This repository provides no game content or public resource-package download.
+
+For the local video project, native touch captures, narration pipeline, preview/export commands and remaining review items, see the [video continuation guide (Chinese)](docs/ANDROID_RELEASE_VIDEO_WORKFLOW.zh-CN.md).
+
+### Historical device results
 
 As of **2026-10-15**, this fork runs the original game on a physical Android device through a native ARM64 host and a Vulkan implementation of the game's NVN graphics interface. It reaches character selection and town, with touch controls, inventory and options, basic melee combat, an Act I camp-to-wilderness round trip, and save/exit followed by a cold restart verified on device.
 
@@ -68,7 +89,7 @@ Work implemented in this fork:
 
 The 2026-10-19 isolated D2R 3.3.94012 package was tested on ROD-W09 for touch movement, menu/options UI input, iOS-derived button art and HUD, and a paused background game save followed by a forced-stop cold load. Physical gamepad hardware and complete rift runs remain untested. This scene runs at about 12–15 fps; dynamic 3D scaling and other remaining differences are recorded in the parity document.
 
-**Build status:** Android source and its [CMake entry point](dm/android/CMakeLists.txt) are checked in. The current APK packaging, game-data preparation and device-regression scripts live in a separate development workspace and are not included here, so a fresh clone is **not yet a complete Android APK build/install workflow**. The iOS setup and IPA instructions below do not build an Android APK. You must supply your own game files; no game assets, shaders or saves are provided by this repository.
+**Build status:** Android source, the [CMake entry point](dm/android/CMakeLists.txt), [APK packager](dm/tools/android_d2r_apk.py) and [offline resource packager](tools/d2r-mobile-port/build_offline_package.py) are checked in; see [Android APK packaging](docs/ANDROID_D2R_APK.md) for the 94012 offline options. You must prepare your own game files and matching patched modules, HUD/world assets, overlays and shaders. A fresh clone alone cannot produce a complete playable game package. The iOS setup and IPA instructions below do not build an Android APK.
 
 The screenshots, 60 FPS claims, feature descriptions and installation instructions below describe the **iOS version**, unless explicitly labeled otherwise.
 
@@ -222,9 +243,9 @@ Most features can be toggled one by one in game under Options → Custom.
   <img src="https://github.com/jhaizhou-ops/d2r-mobile/releases/download/assets/en_map.jpg" width="33%" alt="The full-screen map">
 </p>
 
-### English and Chinese
+### English, Chinese, Spanish and Russian
 
-The whole game switches between English and Chinese under Options → Custom; after a restart, both the interface and the voice acting are in the language you chose. In English, items, skills and monsters use the original Diablo II wording, and everything we added — Greater Rift, Chronicle, the settings page, controller prompts — is in English too.
+The whole game switches between English, Chinese, Spanish and Russian under Options → Custom; after a restart, the interface is in the language you chose. On first launch it follows your device language (Spanish from Spain uses the game's esES text, other Spanish regions use the Latin American esMX text). In English, Spanish and Russian, items, skills and monsters use the original Diablo II wording, and everything we added — Greater Rift, Chronicle, the settings page, gesture prompts, map name plates — is translated too (item notes are translated for Chinese and Spanish only). Russian is the game's single ruRU text, with no regional variants. Voice acting: Chinese UI gets Chinese voices; Russian gets the original Russian voices when your game files include them (a package built from the complete game data does), otherwise English; everything else is English.
 
 <p align="center">
   <img src="https://github.com/jhaizhou-ops/d2r-mobile/releases/download/assets/en_game.jpg" width="58%" alt="Gameplay with the English interface">

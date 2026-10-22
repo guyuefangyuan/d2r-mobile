@@ -7,6 +7,13 @@
 #ifndef NVN_VK_SUBMISSION_H
 #define NVN_VK_SUBMISSION_H
 
+/* One GPU timestamp entry of the per-draw timing diagnostic. kind 0 = pass start, 1 = draw. */
+#define DT_CAP 4096
+typedef struct {
+    char vs[13],ps[13];uint8_t kind,n,depth,blend,dt,dw;uint16_t pass;
+    uint32_t w,h,count,instances,vpw,vph;
+} DrawTime;
+
 typedef enum {
     SUBMISSION_UNUSED, SUBMISSION_RECORDING, SUBMISSION_INFLIGHT,
     SUBMISSION_GPU_DONE, SUBMISSION_PUBLISHED, SUBMISSION_RETIRED
@@ -25,6 +32,11 @@ typedef struct {
     uint64_t chunk_mark;
     unsigned profile_segment; /* Captured at submit, before asynchronous completion. */
     VkDescriptorPool descriptors;
+    /* Descriptor sets are recycled by layout between uses of this submission slot instead of being freed by a pool
+     * reset and allocated again for every draw. extra_pools holds overflow pools created when the main pool ran dry. */
+    struct DescSetBucket {VkDescriptorSetLayout layout;VkDescriptorSet *sets;uint32_t count,used,cap;} *set_buckets;
+    uint32_t nset_buckets,set_buckets_cap,sets_total;
+    VkDescriptorPool extra_pools[4];uint32_t nextra_pools,alloc_pool; /* alloc_pool: 0 = main pool, i+1 = extra_pools[i] */
     VkFence gpu_fence;
     VkQueryPool occlusion,timestamps,pass_ts,chunk_ts,pass_stats;
     uint32_t nchunk_ts;
@@ -67,6 +79,8 @@ typedef struct {
     ImageUse image_uses[2*LIMIT_BINDINGS];
     unsigned nimage_uses;
     uint32_t storage_bias[6][LIMIT_BINDINGS];
+    uint32_t dyn_offset[6][LIMIT_BINDINGS];
+    uint32_t dyn_count[6];
     Range direct_reads[LIMIT_WRITES];
     int direct_read_write_count[LIMIT_WRITES],ndirect_reads;
 
@@ -84,6 +98,7 @@ typedef struct {
     int npipeline;
     PassKey pass_key;
     VkRenderPass passes[LIMIT_WRITES+RETAINED_PASS_LIMIT];
+    uint8_t pass_owned[LIMIT_WRITES+RETAINED_PASS_LIMIT];
     VkFramebuffer framebuffers[LIMIT_WRITES+RETAINED_PASS_LIMIT];
     int npass;
     FramebufferKey framebuffer_keys[LIMIT_WRITES+RETAINED_PASS_LIMIT];
@@ -100,8 +115,20 @@ typedef struct {
     uint32_t npt,pt_open;
     uint64_t pt_draws0;
     struct {uint32_t q0,q1,w,h,n;uint64_t key,draws;} pt[512];
+    /* Per-draw GPU timing (DM_DRAW_TIMING, diagnostic only): one timestamp per draw plus one per pass start. */
+    VkQueryPool draw_ts;uint32_t ndt,dt_pass;
+    DrawTime *dt;
     TraceCapture trace_captures[512];
     unsigned ntrace_captures;
+    /* Exactly one readback per probed pass, before any following pass writes. */
+    struct {
+        VTexture *texture;VBuffer *buffer;
+        uint64_t key,pass,serial;
+        uint32_t w,h,format,slot,mip,layer,sentinel;
+        VkImageLayout layout;
+    } coverage[16];
+    unsigned ncoverage;
+    uint64_t coverage_bytes;
 } VkSubmission;
 
 #endif

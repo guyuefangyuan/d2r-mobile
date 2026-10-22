@@ -4,6 +4,7 @@
 #include "nvn_platform_clock.h"
 #include "nvn_platform_backend.h"
 #include "nvn_present_policy.h"
+#include <sys/resource.h>
 #include "nvn_translation_queue.h"
 #include "nvn_translation_sync.h"
 #include "scale3d_android.h"
@@ -20,10 +21,12 @@ typedef struct {
     sync_t *sync;
     double period;
     int crop[4];
+    uint64_t *fence_out;   /* present jobs: where to store the backend fence of this present */
     NVNcommandHandle handles[];
 } android_xjob;
 static dm_nvn_translation_queue android_xqueue;
 static pthread_once_t android_xonce=PTHREAD_ONCE_INIT;
+static void gw_translate_tick(void);
 static void android_xrun(void *payload) {
     android_xjob *j=payload;
     dm_android_nvn_schedule_thread("translate");
@@ -40,7 +43,12 @@ static void android_xrun(void *payload) {
     case ANDROID_X_PRESENT: {
         dm_android_nvn_work_check_thread();
         mtl_present(j->texture,j->period,j->crop);
-        dm_android_scale3d_present(now_ns(),(uint64_t)(j->period*1e9));
+        if(j->fence_out)*j->fence_out=mtl_last_fence();
+        gw_translate_tick();
+        /* The dynamic resolution controller treats this as the frame time to hit. A 16.7 ms present period would make
+         * every device that cannot reach 60 FPS look like it drops every frame and walk down to the lowest scale, so it
+         * keeps the 30 FPS target (never shorter than 33.3 ms). */
+        {uint64_t target=(uint64_t)(j->period*1e9);if(target<33333332ULL)target=33333332ULL;dm_android_scale3d_present(now_ns(),target);}
         uint64_t frame=atomic_fetch_add(&android_nvn_frame,1)+1;
         mtl_set_frame(frame);dm_android_nvn_presented(frame);
         dm_android_nvn_work_end(frame);break;
@@ -54,6 +62,25 @@ static void android_xrun(void *payload) {
     }
     free(j);
 }
+/* DM_GUEST_WAIT_DIAG: where the guest (game) thread blocks, summed over each 60 presents. */
+static struct {_Atomic uint64_t sync_calls,sync_translate_ns,sync_gpu_ns,pace_ns,ticket_ns,push_ns,drain_ns;int enabled;} gw;
+static uint64_t gw_now(void){return gw.enabled?now_ns():0;}
+/* Per-thread resource usage over each 60 presents (page faults and context switches are not available to simpleperf here). */
+static void gw_rusage(const char *who) {
+    static _Thread_local struct rusage last;static _Thread_local int have;struct rusage u;
+    if(getrusage(RUSAGE_THREAD,&u))return;
+    if(have)fprintf(stderr,"[nvn-android] THREAD_RUSAGE who=%s minflt=%ld majflt=%ld vol_csw=%ld invol_csw=%ld user_ms=%.1f sys_ms=%.1f\n",who,u.ru_minflt-last.ru_minflt,u.ru_majflt-last.ru_majflt,
+        u.ru_nvcsw-last.ru_nvcsw,u.ru_nivcsw-last.ru_nivcsw,
+        ((u.ru_utime.tv_sec-last.ru_utime.tv_sec)*1e3+(u.ru_utime.tv_usec-last.ru_utime.tv_usec)/1e3),
+        ((u.ru_stime.tv_sec-last.ru_stime.tv_sec)*1e3+(u.ru_stime.tv_usec-last.ru_stime.tv_usec)/1e3));
+    last=u;have=1;
+}
+/* DM_GUEST_WAIT_DIAG=trace: timeline of the guest thread's NVN calls for a few frames. */
+static int gw_trace_on(void){static int on=-1;if(on<0){const char *e=getenv("DM_GUEST_WAIT_DIAG");on=e&&!strcmp(e,"trace");}return on;}
+static _Atomic unsigned long long gw_trace_frame;
+#define GW_TRACE(...) do{if(gw.enabled&&gw_trace_on()){unsigned long long f=atomic_load(&gw_trace_frame);if(f>=700&&f<706){fprintf(stderr,"[nvn-android] SYNC_TRACE t=%.3f f=%llu ",now_ns()/1e6,f);fprintf(stderr,__VA_ARGS__);}}}while(0)
+#define GW_ADD(field,t0) do{if(gw.enabled)atomic_fetch_add(&gw.field,now_ns()-(t0));}while(0)
+static void gw_translate_tick(void) {static unsigned n;if(gw.enabled&&++n%60==0)gw_rusage("translate");}
 static void android_xidle(int waiting) {
     static _Thread_local uint64_t token;
     if(waiting)token=dm_android_nvn_work_wait_begin(DM_NVN_WAIT_TRANSLATION_QUEUE);
@@ -69,6 +96,7 @@ static void android_xprepare(void *payload,uint64_t ticket) {
     }
 }
 static void android_xstart(void) {
+    gw.enabled=getenv("DM_GUEST_WAIT_DIAG")!=NULL;
     const char *e=getenv("DM_NVN_SYNC");
     int error=dm_nvn_translation_init(&android_xqueue,android_xrun,e&&atoi(e),android_xidle,android_xprepare);
     LOG("[nvn-android] TRANSLATION_QUEUE mode=%s capacity=%d thread_error=%d",
@@ -82,18 +110,62 @@ static android_xjob *android_xnew(int kind,int n) {
 }
 static uint64_t android_xpush(android_xjob *j) {
     pthread_once(&android_xonce,android_xstart);
-    return dm_nvn_translation_push(&android_xqueue,j);
+    uint64_t t0=gw_now();uint64_t ticket=dm_nvn_translation_push(&android_xqueue,j);GW_ADD(push_ns,t0);return ticket;
 }
-static void x_drain(void) {
+static _Atomic uint64_t gw_line_ns[4096],gw_line_calls[4096];
+static void x_drain_at(int line) {
     pthread_once(&android_xonce,android_xstart);
-    dm_nvn_translation_wait(&android_xqueue,dm_nvn_translation_tail(&android_xqueue),UINT64_MAX);
+    uint64_t t0=gw_now();dm_nvn_translation_wait(&android_xqueue,dm_nvn_translation_tail(&android_xqueue),UINT64_MAX);GW_ADD(drain_ns,t0);
+    if(gw.enabled&&line>=0&&line<4096){atomic_fetch_add(&gw_line_ns[line],now_ns()-t0);atomic_fetch_add(&gw_line_calls[line],1);}
+}
+static void x_drain(void) {x_drain_at(0);}
+/* Command handle -> ticket of the submission that carried it. A handle that was never submitted directly (for
+ * example one only called from another command buffer) is not in the table, and then the whole queue is drained
+ * exactly as before, so a miss costs time but never correctness. */
+#define ANDROID_HT_SIZE 4096
+static struct {NVNcommandHandle handle;uint64_t ticket;} android_ht[ANDROID_HT_SIZE];
+static pthread_mutex_t android_ht_lock=PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t gw_ht_hit,gw_ht_miss;
+static unsigned android_ht_slot(NVNcommandHandle h){return (unsigned)(((uint64_t)h*0x9E3779B97F4A7C15ull)>>52)&(ANDROID_HT_SIZE-1);}
+static int android_finalize_mode(void);
+static void android_note_submit_handles(const NVNcommandHandle *handles,int n,uint64_t ticket) {
+    pthread_mutex_lock(&android_ht_lock);
+    for(int i=0;i<n;i++){unsigned s=android_ht_slot(handles[i]);android_ht[s].handle=handles[i];android_ht[s].ticket=ticket;}
+    pthread_mutex_unlock(&android_ht_lock);
+}
+/* DM_FINALIZE_WAIT: tail (default) = drain the whole queue, the original behaviour; ticket = wait for the submission
+ * that carried the handle; none = do not wait. The NVN contract keeps command memory valid until the fence of the
+ * submission that used it, never until Finalize, so Finalize itself orders nothing. Measured on PPG-AN00: with
+ * none/ticket the game thread runs ahead, but replay is then 14% slower (shared page-protection and allocator
+ * contention) and the frame rate does not improve, so the original behaviour stays the default. */
+static int android_finalize_mode(void) {
+    static int mode=-1;
+    if(mode<0){const char *e=getenv("DM_FINALIZE_WAIT");mode=!e?0:!strcmp(e,"none")?2:!strcmp(e,"ticket")?1:0;}
+    return mode;
+}
+static void android_finalize_handle(NVNcommandHandle h) {
+    int mode=android_finalize_mode();
+    if(mode==2)return;
+    if(mode==0){x_drain_at(0);return;}
+    uint64_t ticket=0;int found=0;
+    pthread_mutex_lock(&android_ht_lock);
+    unsigned s=android_ht_slot(h);if(android_ht[s].handle==h&&android_ht[s].ticket){ticket=android_ht[s].ticket;found=1;}
+    pthread_mutex_unlock(&android_ht_lock);
+    pthread_once(&android_xonce,android_xstart);
+    if(found){uint64_t t0=gw_now();dm_nvn_translation_wait(&android_xqueue,ticket,UINT64_MAX);GW_ADD(drain_ns,t0);
+        if(gw.enabled)atomic_fetch_add(&gw_ht_hit,1);}
+    else{x_drain_at(0);if(gw.enabled)atomic_fetch_add(&gw_ht_miss,1);}
 }
 static void android_queue_fence(sync_t *s) {
+    GW_TRACE("fence_queue sync=%p pending=%llu translated=%llu\n"
+        ,(void *)s,(unsigned long long)atomic_load(&s->pending),(unsigned long long)atomic_load(&s->translated));
     android_xjob *j=android_xnew(ANDROID_X_FENCE,0);j->sync=s;android_xpush(j);
 }
 static NVNsyncWaitResult android_sync_wait(const sync_t *s,uint64_t timeout) {
     uint64_t start=now_ns();
+    if(gw.enabled)atomic_fetch_add(&gw.sync_calls,1);
     uint64_t generation=atomic_load(&s->pending);
+    GW_TRACE("sync_wait sync=%p generation=%llu translated=%llu fenced=%d\n",(void *)s,(unsigned long long)generation,(unsigned long long)atomic_load(&s->translated),(int)s->fenced);
     int ready=atomic_load(&s->translated)>=generation;
     /* Wait only for this fence to be reached, not for the queue tail: a later
      * GPU event may itself need the CPU that is waiting here to signal it. */
@@ -101,11 +173,13 @@ static NVNsyncWaitResult android_sync_wait(const sync_t *s,uint64_t timeout) {
         if(timeout!=UINT64_MAX && now_ns()-start>=timeout)return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
         struct timespec pause={0,100000};nanosleep(&pause,NULL);
     }
+    GW_ADD(sync_translate_ns,start);
     if(!s->fenced)return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
     if(mtl_wait(s->fence,0))return ready?NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED:NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED;
     uint64_t elapsed=now_ns()-start;
     if(timeout!=UINT64_MAX){if(elapsed>=timeout)return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;timeout-=elapsed;}
-    return mtl_wait(s->fence,timeout)?NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED:NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
+    uint64_t gpu0=gw_now();int satisfied=mtl_wait(s->fence,timeout);GW_ADD(sync_gpu_ns,gpu0);
+    return satisfied?NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED:NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
 }
 static void android_gfx_enter(void) {
     pthread_mutex_lock(&android_suspend_mu);
@@ -127,20 +201,7 @@ void dm_gfx_suspend(int on) {
     pthread_mutex_unlock(&android_suspend_mu);if(on){
         x_drain();dm_android_nvn_work_reset(0);mtl_drain();dm_vk_pipeline_cache_save();
         DmVkMemoryStats memory;
-        /* 切后台时把池镜像也丢掉（DM_VK_TRIM_POOLS）：那 1.1 GB 是 guest 内存的副本，
-         * 留着只会让进程 PSS 停在 1.9 GB 左右，而 Android 在内存压力下会直接杀进程
-         * ——回前台就变成重新进局。丢掉之后 PSS 大幅下降，进程能活下来；回到前台的
-         * 第一帧由 pool_materialize 按需重建并重新上传用到的部分。
-         * 实测（骁龙 8G3 平板 8 GB）：丢之前 MemFree 只剩 131 MB，系统 lowmemorykiller
-         * 连续触发后进程被杀（PID 变化、status.json 消失）。
-         * Drop the pool mirror as well when going to the background (DM_VK_TRIM_POOLS): those
-         * 1.1 GB are copies of guest memory, and keeping them holds process PSS near 1.9 GB while
-         * Android kills the process under memory pressure — coming back then means restarting the
-         * run. Dropping them cuts PSS sharply so the process survives, and the first frame back
-         * rebuilds and re-uploads only the parts actually used. Measured on a Snapdragon 8G3
-         * tablet with 8 GB: before the drop MemFree was down to 131 MB and lowmemorykiller
-         * fired repeatedly until the process died (PID changed, status.json gone). */
-        int error=dm_vk_memory_trim_caches(DM_VK_TRIM_ALL|DM_VK_TRIM_POOLS,&memory);
+        int error=dm_vk_memory_trim_caches(DM_VK_TRIM_ALL,&memory);
         if(!error)LOG("ANDROID_GPU_CACHE_TRIM freed=%llu remaining=%llu count=%llu",
             (unsigned long long)memory.last_trim_freed_bytes,
             (unsigned long long)memory.total_bytes,(unsigned long long)memory.trim_count);
@@ -154,7 +215,11 @@ NVN(nvnQueueSubmitCommands,void,NVNqueue *q,int n,const NVNcommandHandle *handle
     android_gfx_enter();
     android_xjob *j=android_xnew(ANDROID_X_SUBMIT,n);
     if(n)memcpy(j->handles,handles,(size_t)n*sizeof(*handles));
-    ((queue_t *)q)->submits++;android_xpush(j);android_gfx_leave();
+    ((queue_t *)q)->submits++;
+    GW_TRACE("submit n=%d\n",n);
+    uint64_t ticket=android_xpush(j);
+    if(n&&android_finalize_mode()==1)android_note_submit_handles(handles,n,ticket);
+    android_gfx_leave();
 }
 __attribute__((constructor)) static void android_nvn_register(void) {
     nvn_init_slots();
@@ -203,54 +268,78 @@ static int android_present_hz=-1,android_display_intervals,android_present_fixed
 extern int dm_android_d2r_fps_setting(void) __attribute__((weak));
 void nvn_present_config(int hz,int display_intervals) {if(hz<0 || hz>1000)die("NVN pacing hz=%d",hz);android_present_hz=hz;android_display_intervals=display_intervals;}
 static uint64_t android_present_period(const win_t *w) {
-    if(android_present_hz<0) {const char *e=getenv("DM_PRESENT_HZ");android_present_hz=e?atoi(e):60;
+    if(android_present_hz<0) {const char *e=getenv("DM_PRESENT_HZ");
+        android_present_hz=e?atoi(e):dm_android_cadence_base_hz(mtl_display_hz(),getenv("DM_DISABLE_PRESENT_CADENCE")!=NULL);
         android_display_intervals=mtl_has_window();}
-    /* 游戏把 nvnWindowBuilderSetPresentInterval 设成 2，即「每 2 个显示节拍出一帧」，
-     * 在 60 Hz 节拍下就是 30 帧。iOS 那边早就把这条当成「剪口」绕过了（DM_PRESENT_INTERVAL=display
-     * 时 itv 固定为 1，见 hle_nvn.c 的 present_period），Android 却一直照游戏给的间隔算，
-     * 这是两端帧率差异的直接原因之一。这里默认忽略游戏设的间隔（每个节拍出一帧 = 60 帧）；
-     * 想看原版语义可以设 DM_ANDROID_GUEST_INTERVAL=1。
-     * The game calls nvnWindowBuilderSetPresentInterval(2), i.e. one frame every two display ticks,
-     * which on a 60 Hz cadence is exactly 30 fps. iOS has long bypassed this as a "cut"
-     * (with DM_PRESENT_INTERVAL=display the interval is pinned to 1, see present_period in hle_nvn.c),
-     * while Android kept honouring the guest's interval — one direct cause of the frame-rate gap.
-     * Ignore the guest interval by default (one frame per tick = 60 fps); set
-     * DM_ANDROID_GUEST_INTERVAL=1 to get the original semantics back. */
-    { static int guest_interval_policy=-1;
-      if(guest_interval_policy<0){const char *e=getenv("DM_ANDROID_GUEST_INTERVAL");guest_interval_policy=e&&atoi(e)?1:0;}
-      if(!guest_interval_policy)android_display_intervals=0; }
-    if(android_present_fixed_60<0)android_present_fixed_60=getenv("DM_ANDROID_PRESENT_60FPS")!=NULL;
+    /* The game's power-saving option is 30 FPS when on and 60 FPS when off, and the upstream iOS build presents at the
+     * display rate when it is off. Do the same here; diagnostics/disable-present-60fps restores the old behaviour of
+     * following the game's own present interval (30 FPS). */
+    /* 默认按 16.7 ms 出图；显式的 DM_PRESENT_HZ（含 0 = 不限速的诊断出口）或 disable-present-60fps 恢复游戏自己的出图间隔。
+     * Present every 16.7 ms by default; an explicit DM_PRESENT_HZ (including 0 = the uncapped diagnostic escape) or
+     * disable-present-60fps restores the game's own present interval. */
+    if(android_present_fixed_60<0)android_present_fixed_60=getenv("DM_ANDROID_PRESENT_60FPS")!=NULL||(!getenv("DM_DISABLE_PRESENT_60FPS")&&!getenv("DM_PRESENT_HZ"));
     uint64_t period=dm_android_present_period_ns(android_present_hz,android_display_intervals,w->interval,android_present_fixed_60);
-    /* 每帧读一次已生效的设置；「应用 / 放弃」的语义不变，fixed60 诊断开关优先级最高。
-     * 传的是目标帧率本身（60 / 40 / 30），不是「是不是 30」的布尔值——三档都靠它封顶。
-     * Read the applied settings once per frame; Apply/Discard keep their semantics and the fixed60
-     * diagnostic switch keeps precedence. The value passed is the target frame rate itself
-     * (60 / 40 / 30), not a boolean "is it 30" — all three tiers are capped through it. */
-    if(!android_present_fixed_60 && dm_android_d2r_fps_setting)
-        period=dm_android_present_power_period_ns(period,dm_android_d2r_fps_setting());
+    /* Read applied settings on every frame. Apply/Discard keep their shared
+     * semantics; the explicit fixed60 diagnostic retains precedence. */
+    if(dm_android_d2r_fps_setting)
+        period=dm_android_present_power_period_ns(period,dm_android_d2r_fps_setting()==30);
     return period;
 }
 static void android_present_log(const win_t *w) {
     uint64_t period=android_present_period(w);
     LOG("[nvn-android] PRESENT_POLICY mode=%s base_hz=%d guest_interval=%d apply_guest_interval=%d effective_period_ns=%llu",
-        android_present_fixed_60?"fixed60-experiment":"guest",android_present_hz,w->interval,
+        android_present_fixed_60?"fixed60":"guest",android_present_hz,w->interval,
         android_display_intervals&&!android_present_fixed_60,(unsigned long long)period);
 }
 NVN(nvnWindowAcquireTexture,NVNwindowAcquireTextureResult,NVNwindow *window,NVNsync *sync,int *index) {
     win_t *w=(void *)window;if(!index || w->ntex<1 || w->ntex>4)die("NVN acquire window",0);
+    GW_TRACE("acquire\n");
     android_gfx_enter();dm_android_nvn_schedule_thread("acquire");*index=w->next++%w->ntex;
     uint64_t now=now_ns(),period=android_present_period(w);nvn_pacer p={w->pace};uint64_t wait=nvn_pace(&p,now,period);w->pace=p.target;
-    if(wait)dm_android_nvn_sleep_until(now+wait);
+    if(wait){uint64_t t0=gw_now();dm_android_nvn_sleep_until(now+wait);GW_ADD(pace_ns,t0);}
     /* These are translation tickets, not Vulkan fence/present numbers. The
      * backend owns image/GPU reuse; its present_wait only checks ticket validity. */
-    if(w->ticket[*index])dm_nvn_translation_wait(&android_xqueue,w->ticket[*index],UINT64_MAX);
-    if(sync)android_queue_fence((sync_t *)sync);
+    if(w->ticket[*index]){uint64_t t0=gw_now();dm_nvn_translation_wait(&android_xqueue,w->ticket[*index],UINT64_MAX);GW_ADD(ticket_ns,t0);}
+    if(sync) {
+        /* NVN: the acquire sync means "this image is free", i.e. its previous present is done. Queuing a FENCE job
+         * (the default) publishes the newest backend fence behind ALL earlier jobs. DM_ACQUIRE_SYNC=early publishes
+         * the fence of this image's previous present instead; it did not change the frame rate by itself. */
+        static int early=-1;
+        if(early<0){const char *e=getenv("DM_ACQUIRE_SYNC");early=e&&!strcmp(e,"early");}
+        if(early)dm_nvn_sync_publish((sync_t *)sync,w->pfence[*index]);
+        else android_queue_fence((sync_t *)sync);
+    }
     android_xpush(android_xnew(ANDROID_X_BEGIN,0));android_gfx_leave();return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
 int (*g_nvn_loadscreen_up)(void);
 NVN(nvnQueuePresentTexture,void,NVNqueue *q,NVNwindow *window,int index) {
     (void)q;win_t *w=(void *)window;if(index<0 || index>=w->ntex || index>=4 || !w->tex[index])die("NVN present index %d",index);
+    GW_TRACE("present index=%d\n",index);atomic_fetch_add(&gw_trace_frame,1);
     android_gfx_enter();android_xjob *j=android_xnew(ANDROID_X_PRESENT,0);
+    j->fence_out=&w->pfence[index];
     j->texture=snap_tex(w->tex[index]);j->period=android_present_period(w)/1e9;memcpy(j->crop,w->crop,sizeof(j->crop));
-    w->ticket[index]=android_xpush(j);w->presents++;android_gfx_leave();
+    w->ticket[index]=android_xpush(j);w->presents++;
+    if(gw.enabled&&w->presents%60==0){
+        fprintf(stderr,"[nvn-android] GUEST_WAIT presents=%llu sync_calls=%llu sync_translate_ms=%.1f sync_gpu_ms=%.1f pace_ms=%.1f acquire_ticket_ms=%.1f push_ms=%.1f drain_ms=%.1f%s",
+            (unsigned long long)w->presents,(unsigned long long)atomic_exchange(&gw.sync_calls,0),atomic_exchange(&gw.sync_translate_ns,0)/1e6,
+            atomic_exchange(&gw.sync_gpu_ns,0)/1e6,atomic_exchange(&gw.pace_ns,0)/1e6,atomic_exchange(&gw.ticket_ns,0)/1e6,
+            atomic_exchange(&gw.push_ns,0)/1e6,atomic_exchange(&gw.drain_ns,0)/1e6,"\n");
+        fprintf(stderr,"[nvn-android] FINALIZE_HANDLE hit=%llu miss=%llu""\n",(unsigned long long)atomic_exchange(&gw_ht_hit,0),(unsigned long long)atomic_exchange(&gw_ht_miss,0));
+        gw_rusage("guest");
+        {static uint64_t pf,pp,pc,pg,pn;uint64_t faults,preps,calls,pages,ns;
+         nvn_dirty_stats(&faults,&preps);nvn_dirty_mp_stats(&calls,&pages,&ns);
+         fprintf(stderr,"[nvn-android] DIRTY_COST faults=%llu host_preps=%llu mprotect_calls=%llu mprotect_pages=%llu mprotect_ms=%.1f\n",
+            (unsigned long long)(faults-pf),(unsigned long long)(preps-pp),(unsigned long long)(calls-pc),(unsigned long long)(pages-pg),(ns-pn)/1e6);
+         pf=faults;pp=preps;pc=calls;pg=pages;pn=ns;}
+        {static uint64_t prev[NVN_NFUNC];uint64_t delta[NVN_NFUNC];
+         for(unsigned i=0;i<NVN_NFUNC;i++){uint64_t c=atomic_load(&nvn_slot[i].cnt);delta[i]=c-prev[i];prev[i]=c;}
+         for(int top=0;top<80;top++){unsigned best=0;for(unsigned i=1;i<NVN_NFUNC;i++)if(delta[i]>delta[best])best=i;
+            if(!delta[best])break;
+            fprintf(stderr,"[nvn-android] NVN_CALLS %s per_frame=%.1f\n",nvn_names[best],(double)delta[best]/60.0);delta[best]=0;}}
+        for(int top=0;top<4;top++){int best=-1;uint64_t bn=0;
+            for(int l=0;l<4096;l++){uint64_t n=atomic_load(&gw_line_ns[l]);if(n>bn){bn=n;best=l;}}
+            if(best<0)break;
+            fprintf(stderr,"[nvn-android] GUEST_DRAIN_SITE line=%d calls=%llu ms=%.1f""\n",best,(unsigned long long)atomic_exchange(&gw_line_calls[best],0),atomic_exchange(&gw_line_ns[best],0)/1e6);}
+        for(int l=0;l<4096;l++){atomic_store(&gw_line_ns[l],0);atomic_store(&gw_line_calls[l],0);}}
+    android_gfx_leave();
 }

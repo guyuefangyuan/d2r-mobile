@@ -56,7 +56,7 @@ public final class TouchControlsView extends View {
         catch(UnsatisfiedLinkError unavailable){hudNative=false;}
         return false;
     }
-    public void setActive(boolean on){active=on;nativeEnable(on);if(!on)clearHud();if(on)resize();postInvalidateOnAnimation();}
+    public void setActive(boolean on){if(active==on)return;active=on;nativeEnable(on);if(!on)clearHud();if(on)resize();postInvalidateOnAnimation();}
     public void setTouchActivation(BooleanSupplier activation){touchActivation=activation;}
     private void clearHud(){if(hudNative)try{nativeHudRendered(null,0);}catch(UnsatisfiedLinkError unavailable){hudNative=false;}}
     public void cancel(){nativeCancel();clearHud();}
@@ -114,7 +114,10 @@ public final class TouchControlsView extends View {
         float k=frame[38]/60;hudRenderer.viewport(getWidth()/density,getHeight()/density);
         for(int i=0;i<12;i++){
             // iOS drawRect keeps belt and cross hit areas, but their artwork belongs to drawV4.
-            if(!D2rHudRenderer.visible(hud,i)||(i>5&&i<=10))continue;
+            boolean cancel=!navigation&&i==11&&D2rHudRenderer.extended(hud)&&hud[102]!=0;
+            // 隐藏地图键后，拖技能进入右上角仍显示取消提示。
+            // Keep the skill-drag cancellation cue even while the map key is hidden.
+            if((!D2rHudRenderer.visible(hud,i)&&!cancel)||(i>5&&i<=10))continue;
             float x=frame[i*3],y=frame[i*3+1],r=frame[i*3+2];if(r<=0)continue;
             boolean pressed=frame[44+i]>0||(i<5&&(hud[19]&SKILL_BUTTONS[i])!=0);
             if(!navigation&&i<=5){
@@ -123,7 +126,6 @@ public final class TouchControlsView extends View {
                 if(glyph){if(hudRenderer.drawSkill(canvas,hud,i,x,y,r,pressed)&&i<5)drawn|=1<<i;}
                 else if(!empty&&i<5)hudRenderer.skillLabel(canvas,hud,i,x,y,r);
             }else{
-                boolean cancel=!navigation&&i==11&&D2rHudRenderer.extended(hud)&&hud[102]!=0;
                 if(cancel){paint.setStyle(Paint.Style.FILL);paint.setColor(0x5c8c0d0a);canvas.drawRect(x-r,y-r,x+r,y+r,paint);}
                 hudRenderer.fixed(canvas,navigation||cancel?-1:i,x,y,r,pressed);
                 if(cancel)hudRenderer.caption(canvas,chinese?"取消":"Cancel",x,y,10*k,pressed?1:.84f);
@@ -146,8 +148,8 @@ public final class TouchControlsView extends View {
         return !D2rHudRenderer.navigation(hudFrame)&&hudFrame[16]==0;
     }
     @Override public boolean onTouchEvent(MotionEvent event){
-        // This overlay remains above the legacy menu buttons in controller
-        // mode. Claim DOWN before those buttons can consume the first gesture.
+        // 实体手柄使用后，首个触摸手势立即接管并继续传递。
+        // After physical-controller input, the first touch takes over and continues through this gesture.
         if(!active&&(event.getActionMasked()!=MotionEvent.ACTION_DOWN||touchActivation==null||!touchActivation.getAsBoolean()))return false;
         if(!ready.getAsBoolean())return true;
         int action=event.getActionMasked(),skip=action==MotionEvent.ACTION_POINTER_UP?event.getActionIndex():-1;

@@ -175,6 +175,22 @@ static _Atomic uint64_t g_exact_xy = UINT64_MAX;   // 最近一次命中落在�
 static _Atomic int g_sn_new;   // 新一次按下（dm_ui_item_query 置）：上一次的吸附 / 停靠作废。只按「请求点没变」续用会跨触摸残留——同一落点再按，光标还在停靠点，长按判成空格去整理背包 | A new press (set by dm_ui_item_query): the previous snap / parking is invalidated. Reusing it only on 'the request point has not changed' would leave residue across touches -- pressing the same landing point again, the cursor is still at the parking point, and the long-press is classified as an empty cell and sorts the inventory
 static int sn_on; static _Atomic uint64_t g_snap;   // 就近吸附中；g_snap = 吸附记录（请求点 x | y<<16 | 落点 x<<32 | y<<48），长按据此分「贴着物品边」与「落在空格中间」 | Nearest snap in effect; g_snap = snap record (request point x | y<<16 | landing point x<<32 | y<<48); long-press uses it to tell 'next to an item's edge' from 'in the middle of an empty cell'
 static _Atomic int g_free_pub;
+// 真鼠标悬停复用原版焦点重算；不能套触屏的「胖手指」吸附，否则空格旁也会冒出邻格说明。
+// Real mouse hover reuses the game's focus refresh, bypassing touch's fat-finger snap so empty cells do not show a neighbor's tooltip.
+int dm_ui_mouse_hover_now(float nx, float ny) {
+    module_t *m = main_module();
+    uint64_t waiting = atomic_load(&g_a_wait);
+    if (!m || dm_hud_held() || dm_cursor_pending() || (waiting && now_ns() - waiting < 300000000ull) || !free_cursor_page(m)) return 0;
+    int w = *(int32_t *)(m->base + 0x211da38), h = *(int32_t *)(m->base + 0x211da3c);
+    if (w <= 0 || h <= 0) return 0;
+    int x, y;
+    if (!(nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1)) { x = w * 2 / 100; y = h / 2; }
+    else { x = (int)(nx * w); y = (int)(ny * h); if (x >= w) x = w - 1; if (y >= h) y = h - 1; }
+    { int dm_vault_ui_blocks(int, int); if ((dm_ui_panel_state() & DM_PS_VAULT) && dm_vault_ui_blocks(x, y)) return 0; }
+    int ok = dm_ui_hover_now(x, y);
+    if (getenv("DM_TEST_HOVER_LOG")) { dm_cursor_item_info ci = {0}; int found = dm_cursor_item(&ci); LOG("鼠标悬停刷新：(%d,%d) → %d 物品 %s id %u", x, y, ok, found ? ci.code : "-", ci.id); }
+    return ok;
+}
 int dm_ui_free_cursor(void) { return atomic_load(&g_free_pub); }   // 当前页有没有自由光标（物品栏 / 技能树 / 属性页这类） | Whether the current page has a free cursor (pages such as inventory / skill tree / attributes)
 void dm_cursor_apply(uint64_t *buttons, int32_t *lx, int32_t *ly) {
     cursor_apply(buttons, lx, ly);
@@ -1079,12 +1095,11 @@ static int ui_classify(module_t *m, uint64_t root, int x, int y, char *hit, size
     // 原先设置页开着时把暂停菜单整层设成不可见、关了写回——那是写原版控件，违反不写原版控件的规则，改成这里只在命中时挡
     // The settings page covers the pause menu, yet the pause menu's buttons still receive clicks (the game's dispatch does not look at who is on top): on a pause menu button and not on a clickable widget of the settings page = covered, do not click (same as "on a button covered by an upper panel").
     // Previously, while the settings page was open the whole pause menu layer was set invisible and written back on close - that is writing to the original game's widgets, violating the no-writes-to-original-widgets rule; changed to blocking here only on a hit
-    { uint64_t st = ui_panel(root, "SettingsPanel"), xy = (uint64_t)(uint32_t)x | ((uint64_t)(uint32_t)y << 32);
-      uint64_t cp = ui_panel(root, "VideoOptionsPanel");   // 自定义页（借的视频页）与设置页并列、不是它的子控件：这一页上的勾选框也算「设置页自己可点的控件」（语言行的「中文」那格正落在暂停菜单按钮的位置上） | The Custom page (the borrowed video page) sits beside the settings page and is not its child: checkboxes on this page also count as "controls of the settings page itself that can be tapped" (the 「中文」 box of the language row lands exactly where the pause menu button is)
-      if (st && *(uint8_t *)(st + 0x50) && !click_walk(st, xy, 1, (uint64_t)m->base) && !(cp && *(uint8_t *)(cp + 0x50) && click_walk(cp, xy, 1, (uint64_t)m->base))) {   // 设置页自己可点的控件照常；点在它的底板 / 列表空处时，游戏会把这一下交给底下的暂停菜单按钮 | The settings page's own clickable widgets work as usual; when the tap is on its backing / empty list space, the game would hand this tap to the pause menu button underneath
-          static const char *const pl[] = { "PauseLayoutGarden", "PauseLayout" };
-          for (int i = 0; i < 2; i++) { uint64_t pw = ui_panel(root, pl[i]); if (pw && *(uint8_t *)(pw + 0x50) && click_walk(pw, xy, 1, (uint64_t)m->base)) { snprintf(hit, hn, "设置页盖着的暂停菜单按钮（不点，可滚）"); return 11; }   /* 11：这一下不点下去，但从这里起手上下拖照常滚设置页的列表（自定义页各行的文字不是可点控件，玩家多半就在文字上滑） | 11: this tap is not pressed down, but a vertical drag starting here still scrolls the settings page list as usual (the text of the rows on the Custom page is not a clickable widget, and players mostly swipe right on the text) */ } } }
-    const char *mn = ""; uint64_t mp = modal_top(m, root, &mn);
+    // 模态框（确认框等）先判：它开着时输入归它，下面「设置页盖着的暂停菜单按钮（不点）」那一段不能再拦——
+    // 确认框的「应用 / 放弃」按钮正好落在暂停菜单按钮的位置上，先判盖着会把这两颗键按成「不点」（真机：点 Apply / Discard 没反应）
+    // The modal box (confirmation box etc.) is judged first: while it is open the input belongs to it, and the later "pause menu button under the settings page (do not click)" block must not intercept it --
+    // the confirmation box's 「应用 / 放弃」(Apply / Discard) buttons sit exactly where the pause menu buttons are, and judging the covered layer first turned those two into "do not click" (real device: tapping Apply / Discard did nothing)
+    const char *mn = ""; int modal_in = 0; uint64_t mp = modal_top(m, root, &mn);
     if (mp) { uint64_t xy = (uint64_t)(uint32_t)x | ((uint64_t)(uint32_t)y << 32), fn = *(uint64_t *)(*(uint64_t *)mp + 0x48);
         // 「在框里」：框自己有边界且点在里面，或点中它的某个可见叶子 / 可点控件（确认框的「应用 / 放弃」按钮只有后一种认得到——
         // 只用叶子判时点「应用」被当成框外，确认框按不动）
@@ -1092,7 +1107,13 @@ static int ui_classify(module_t *m, uint64_t root, int x, int y, char *hit, size
         // judging by leaves alone, a tap on 「应用」(Apply) was treated as outside the box and the confirmation box could not be pressed)
         int in = ((((int (*)(uint64_t, uint64_t))fn)(mp, xy) & 1) && !(((int (*)(uint64_t, uint64_t))fn)(mp, (uint64_t)3 | ((uint64_t)3 << 32)) & 1))
               || inside_walk(mp, xy, 1, (uint64_t)m->base + 0x20c1328) || click_walk(mp, xy, 1, (uint64_t)m->base);
-        if (!in) { snprintf(hit, hn, "模态框外 %s", mn); g_modal_name = mn; return 9; } }
+        if (!in) { snprintf(hit, hn, "模态框外 %s", mn); g_modal_name = mn; return 9; } modal_in = 1; }
+    if (!modal_in) { uint64_t st = ui_panel(root, "SettingsPanel"), xy = (uint64_t)(uint32_t)x | ((uint64_t)(uint32_t)y << 32);
+      uint64_t cp = ui_panel(root, "VideoOptionsPanel");   // 自定义页（借的视频页）与设置页并列、不是它的子控件：这一页上的勾选框也算「设置页自己可点的控件」（语言行的「中文」那格正落在暂停菜单按钮的位置上） | The Custom page (the borrowed video page) sits beside the settings page and is not its child: checkboxes on this page also count as "controls of the settings page itself that can be tapped" (the 「中文」 box of the language row lands exactly where the pause menu button is)
+      if (st && *(uint8_t *)(st + 0x50) && !click_walk(st, xy, 1, (uint64_t)m->base) && !(cp && *(uint8_t *)(cp + 0x50) && click_walk(cp, xy, 1, (uint64_t)m->base))) {   // 设置页自己可点的控件照常；点在它的底板 / 列表空处时，游戏会把这一下交给底下的暂停菜单按钮 | The settings page's own clickable widgets work as usual; when the tap is on its backing / empty list space, the game would hand this tap to the pause menu button underneath
+          static const char *const pl[] = { "PauseLayoutGarden", "PauseLayout" };
+          for (int i = 0; i < 2; i++) { uint64_t pw = ui_panel(root, pl[i]); if (pw && *(uint8_t *)(pw + 0x50) && click_walk(pw, xy, 1, (uint64_t)m->base)) { snprintf(hit, hn, "设置页盖着的暂停菜单按钮（不点，可滚）"); return 11; }   /* 11：这一下不点下去，但从这里起手上下拖照常滚设置页的列表（自定义页各行的文字不是可点控件，玩家多半就在文字上滑） | 11: this tap is not pressed down, but a vertical drag starting here still scrolls the settings page list as usual (the text of the rows on the Custom page is not a clickable widget, and players mostly swipe right on the text) */ } } }
+
     // 单件任务槽面板（灌魔 / 打孔 / 个性化 / 古墓底座）的关闭钮画在外框右上角凹槽里，但它属于最先打开的 ImbueItemsPanel，凹槽那块被后开的背包面板与外框盖在上层：
     // 按层级它不算可点控件，游戏自己的鼠标分发也到不了它（点了有鼠标按下抬起、没有关面板消息）。点中它 = 走「点面板外 = 关面板」那条现成的路（原版的返回键）
     // The close button of the single-item quest slot panel (imbue / socketing / personalize / tomb pedestal) is drawn in the notch at the top right of the outer frame, but it belongs to the ImbueItemsPanel opened first, and that notch area is covered on upper layers by the later-opened inventory panel and the outer frame:

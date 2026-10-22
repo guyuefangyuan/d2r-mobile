@@ -59,6 +59,8 @@ void dm_android_d2r_rift_tick(uint64_t game, uint64_t player, uint8_t *main_base
 int dm_android_d2r_players_get(uint8_t *main_base) __attribute__((weak));
 void dm_android_d2r_ui_tick(uint64_t game,uint64_t player,uint8_t *main_base)
     __attribute__((weak));
+void dm_android_d2r_debug_tick(uint64_t game,uint64_t player,uint8_t *main_base,uint64_t runs)
+    __attribute__((weak));
 
 static int read_memory(uint64_t address, void *out, size_t bytes) {
     if (!address || !out || !bytes || address > UINT64_MAX - bytes) return 0;
@@ -90,6 +92,22 @@ static uint64_t live_runs(void) {
         ++count;
     }
     return count ? (hash ? hash : 1) : 0;
+}
+extern uint64_t dm_nvn_frame_count(void) __attribute__((weak));
+/* The freeze hooks run for every hooked game call, many times per frame, and each live_runs() is a process_vm_readv of
+ * 8 KB plus a 1024-slot hash. The run table only changes when a run starts or ends, so one read per presented frame is
+ * enough (a change is noticed at most one frame later). DM_DISABLE_RUNS_CACHE restores a read per call. */
+static uint64_t live_runs_frame_cached(void) {
+    static uint64_t cached_frame=UINT64_MAX,cached_value,cached_ms;static int off=-1;
+    if(off<0)off=getenv("DM_DISABLE_RUNS_CACHE")!=NULL;
+    uint64_t frame=(!off&&dm_nvn_frame_count)?dm_nvn_frame_count():UINT64_MAX;
+    /* 帧计数只在出图时前进（加载画面、后台、丢失 Surface 时不动），所以再加一个 50 ms 的时间上限。
+     * The frame count only advances on presents (not during loading screens, in the background or without a Surface), so the
+     * cache is also bounded to 50 ms. */
+    struct timespec ts;clock_gettime(CLOCK_MONOTONIC_COARSE,&ts);
+    uint64_t now_ms=(uint64_t)ts.tv_sec*1000u+(uint64_t)ts.tv_nsec/1000000u;
+    if(frame!=UINT64_MAX&&frame==cached_frame&&now_ms-cached_ms<50)return cached_value;
+    uint64_t value=live_runs();cached_frame=frame;cached_value=value;cached_ms=now_ms;return value;
 }
 static void clear_freeze(void) {
     background_active=restore_pending=0;
@@ -126,7 +144,7 @@ static void restore_pause_locked(void) {
     LOG("ANDROID_D2R_PAUSED_SAVE restored_pause=1 thawed=1");
 }
 static int frozen_now_locked(void) {
-    uint64_t runs=live_runs();
+    uint64_t runs=live_runs_frame_cached();
     if (background_active && (last_game!=background_game || runs!=background_runs)) clear_freeze();
     if (atomic_load(&frozen)) return 1;
     if (paused_game) {
@@ -144,7 +162,7 @@ static void freeze_world(const uint64_t *registers) {
     pthread_mutex_lock(&lock);
     if (restore_pending) restore_pause_locked();
     if (frozen_now_locked() || (registers[0]==frozen_tick_game && frozen_tick_game &&
-        live_runs()==frozen_tick_runs)) {
+        live_runs_frame_cached()==frozen_tick_runs)) {
         game[0x170/8]=0;
         game[0x188/8]=(uintptr_t)queue;
         ((uint64_t *)registers)[0]=(uintptr_t)game;
@@ -520,6 +538,10 @@ static void tick_callback(const uint64_t *registers) {
     }
     if (!stopped && dm_android_d2r_ui_tick)
         dm_android_d2r_ui_tick(valid?game:0,valid?player:0,main_base);
+    /* A debug warp may invalidate guest objects. It must be the final host
+     * consumer, outside the save mutex; never pass a frozen world's player. */
+    if (dm_android_d2r_debug_tick)
+        dm_android_d2r_debug_tick(valid?game:0,player,main_base,valid?runs:0);
 }
 int dm_android_d2r_save_attach(module_t *main) {
     if (!main || strcmp(main->name, "main") || !main->base ||

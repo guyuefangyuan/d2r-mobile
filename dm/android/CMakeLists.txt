@@ -12,7 +12,7 @@ add_library(dm_android_gfx OBJECT
   ../gfx/hle_vi.c ../gfx/hle_nv.c movie_start.c)
 target_include_directories(dm_android_gfx PRIVATE ../host . ../gfx/nvn ../gfx/nvn/include)
 target_compile_options(dm_android_gfx PRIVATE -Wall -Wextra -Werror -Wno-format -Wno-unused-function -ffixed-x18)
-target_compile_definitions(dm_android_gfx PRIVATE _GNU_SOURCE TARGET_OS_IPHONE=0)
+target_compile_definitions(dm_android_gfx PRIVATE _GNU_SOURCE TARGET_OS_IPHONE=0 DM_EXPECT_VULKAN_BACKEND=1)
 set_target_properties(dm_android_gfx PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(dm_android_gfx PUBLIC vulkan android log dl z m)
 set(DM_HOST ../host)
@@ -184,6 +184,14 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_probe.c")
   target_link_libraries(dm_android_vulkan_probe PRIVATE vulkan android log m)
   target_link_options(dm_android_vulkan_probe PRIVATE -Wl,-z,max-page-size=16384)
 endif()
+# Device positive controls for format-aware sentinels, mip/layer isolation,
+# one readback per pass, and the resolution/world budgets.
+add_executable(dm_android_vk_coverage_probe EXCLUDE_FROM_ALL tests/t_vk_coverage_device.c)
+target_include_directories(dm_android_vk_coverage_probe PRIVATE ../host . ../gfx/nvn ../gfx/nvn/include)
+target_compile_options(dm_android_vk_coverage_probe PRIVATE -Wall -Wextra -Werror -Wno-unused-function -ffixed-x18)
+target_compile_definitions(dm_android_vk_coverage_probe PRIVATE _GNU_SOURCE TARGET_OS_IPHONE=0)
+target_link_libraries(dm_android_vk_coverage_probe PRIVATE vulkan log m)
+target_link_options(dm_android_vk_coverage_probe PRIVATE -Wl,-z,max-page-size=16384)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/romfs_image.c")
   target_sources(dm_android_core PRIVATE romfs_image.c)
   # romfs_samples.h is generated from a locally supplied game image. Keep the
@@ -209,7 +217,15 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/romfs_image.c")
   # d2r_host_modules.c attaches only the gates present in the loaded artifact.
   set(DM_ANDROID_VAULT_TABLE "" CACHE FILEPATH "Generated dm_vault_tab.h for the D2R UI bridge")
   option(DM_ANDROID_D2R_HOST_MODULES "Enable verified D2R 94012 private adapters" OFF)
-  add_library(d2r_mobile_android SHARED app_jni.c ${DM_RESOURCE_PROBE_SOURCE})
+  option(DM_ANDROID_DEBUG_CONSOLE "Build the opt-in D2R QA console (isolated saves)" OFF)
+  if(DM_ANDROID_DEBUG_CONSOLE AND NOT DM_ANDROID_D2R_HOST_MODULES)
+    message(FATAL_ERROR "The QA console requires DM_ANDROID_D2R_HOST_MODULES")
+  endif()
+  add_library(d2r_mobile_android SHARED app_jni.c d2r_mod_loader.c ${DM_RESOURCE_PROBE_SOURCE})
+  if(DM_ANDROID_DEBUG_CONSOLE)
+    target_sources(d2r_mobile_android PRIVATE d2r_debug_mode.c)
+    target_compile_definitions(d2r_mobile_android PRIVATE DM_ANDROID_DEBUG_CONSOLE=1)
+  endif()
   target_include_directories(d2r_mobile_android PRIVATE "${CMAKE_BINARY_DIR}/generated")
   if(DM_ANDROID_D2R_HOST_MODULES)
   if(NOT DM_ANDROID_VAULT_TABLE)
@@ -229,7 +245,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/romfs_image.c")
       message(FATAL_ERROR "DM_ANDROID_VAULT_TABLE does not exist: ${DM_ANDROID_VAULT_TABLE}")
     endif()
     configure_file("${DM_ANDROID_VAULT_TABLE}" "${CMAKE_BINARY_DIR}/generated/dm_vault_tab.h" COPYONLY)
-    target_sources(d2r_mobile_android PRIVATE d2r_ui_adapter.c d2r_hud_android.c d2r_custom_android.c d2r_world_overlay_android.c
+    target_sources(d2r_mobile_android PRIVATE d2r_ui_adapter.c d2r_hud_android.c d2r_custom_android.c d2r_world_overlay_android.c d2r_map_reveal.c
       ${DM_HOST}/dm_update.c
       ${DM_HOST}/dm_cursor.c ${DM_HOST}/dm_actions.c ${DM_HOST}/dm_world.c
       ${DM_HOST}/dm_cursor_item.c ${DM_HOST}/dm_uiscreen.c ${DM_HOST}/dm_prof.c

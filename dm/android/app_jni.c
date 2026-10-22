@@ -7,7 +7,36 @@
 #include "render_scale.h"
 #include "touch_controls_android.h"
 #include "d2r_host_modules.h"
+#include "d2r_mod_loader.h"
+#ifdef DM_ANDROID_D2R_UI
+#include "d2r_map_reveal.h"
+#include "d2r_ui_adapter.h"
+#endif
+#ifdef DM_ANDROID_DEBUG_CONSOLE
+#include "d2r_debug_mode.h"
+#endif
 #include "d2r_custom_android.h"
+#include <jni.h>
+#include "../host/dm_i18n.h"
+
+/* Android UI 只取队列和译文；原游戏控件留在游戏线程。
+ * Android UI reads only queued requests and translations; game widgets stay on the game thread. */
+JNIEXPORT jboolean JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeShowFps(JNIEnv *env,jclass cls) {
+    (void)env;(void)cls;int dm_custom_get(const char *);return dm_custom_get("show_fps")!=0;
+}
+JNIEXPORT jboolean JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeFrontendTouch(JNIEnv *env,jclass cls,jint phase,jfloat x,jfloat y) {
+    (void)env;(void)cls;
+#ifdef DM_ANDROID_D2R_UI
+    return dm_android_d2r_frontend_touch(phase,x,y)!=0;
+#else
+    (void)phase;(void)x;(void)y;
+    return JNI_FALSE;
+#endif
+}
+JNIEXPORT jstring JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeUiText(JNIEnv *env,jclass cls,jstring key) {
+    (void)cls;if(!key)return NULL;const char *text=(*env)->GetStringUTFChars(env,key,NULL);if(!text)return NULL;
+    jstring result=(*env)->NewStringUTF(env,dm_ui(text));(*env)->ReleaseStringUTFChars(env,key,text);return result;
+}
 #include "lifecycle_android.h"
 #include "scale3d_android.h"
 #include "../gfx/nvn/nvn_vk_memory.h"
@@ -211,6 +240,20 @@ static void path(char *out, size_t cap, const char *base, const char *leaf) {
 }
 /* Shared with the quality-mode menu. An absent file enables automatic
  * dynamic scaling; reject truncated values, NaN/Inf, and extra tokens. */
+/* 把 diagnostics 下标记文件的内容（去掉首尾空白，至多 15 字节）放进环境变量；文件为空时用 fallback（NULL = 不设置）。
+ * Put the content of a diagnostics marker file (whitespace trimmed, at most 15 bytes) into an environment variable; an empty
+ * file uses fallback (NULL = leave unset). */
+static void marker_to_env(const char *leaf, const char *name, const char *fallback) {
+    char file[PATH_MAX], v[16] = {0};
+    path(file, sizeof file, port_root, leaf);
+    FILE *f = fopen(file, "r");
+    if (!f) return;
+    size_t n = fread(v, 1, 15, f);
+    fclose(f);
+    while (n && (v[n - 1] == 10 || v[n - 1] == 13 || v[n - 1] == 32)) v[--n] = 0;
+    if (n) setenv(name, v, 1);
+    else if (fallback) setenv(name, fallback, 1);
+}
 static int configure_render_scale(void) {
     char marker[PATH_MAX], text[64], value[32];
     path(marker,sizeof marker,port_root,"diagnostics/render-scale.txt");
@@ -407,8 +450,8 @@ static void *lifecycle_worker(void *unused) {
                     (unsigned long long)commits,froze,(unsigned long long)epoch);
             } else LOG("Android lifecycle: background outside run, save wait skipped");
             if (background_current(epoch)) {
-                char save[PATH_MAX]; path(save,sizeof save,port_root,"save");
-                if (dm_android_fs_sync_tree(save)) LOG("Android lifecycle: save tree sync failed errno=%d",errno);
+                const char *save=getenv("DM_SAVE");
+                if (save && dm_android_fs_sync_tree(save)) LOG("Android lifecycle: save tree sync failed errno=%d",errno);
             }
         }
         pthread_mutex_lock(&state_lock);
@@ -518,30 +561,31 @@ static void *game_thread(void *unused) {
     uint64_t expected_image_bytes=content_romfs_bytes;
     pthread_mutex_unlock(&state_lock);
     struct stat st;
-    /* 诊断：把期望值与实际值都打出来——ROM 不匹配时这两个数字就能直接说明是哪一侧的问题。 */
-    /* Diagnostics: log both the expected and the observed size so a ROM mismatch names its side. */
-    if (stat(image,&st) || st.st_size < 0 || (uint64_t)st.st_size != expected_image_bytes) {
-        LOG("ANDROID_ROMFS_SIZE expected=%llu observed=%lld path=%s",
-            (unsigned long long)expected_image_bytes, (long long)(stat(image,&st)==0?st.st_size:-1), image);
+    if (stat(image,&st) || st.st_size < 0 || (uint64_t)st.st_size != expected_image_bytes)
         die("Original RomFS image absent or differs from the verified content manifest");
-    }
     phase_set("正在读取游戏资源");
     int error = romfs_image_setup_checked(image,rom,expected_image_bytes);
     if (error) die("RomFS image setup errno=%d",errno);
-    if (dm_android_fs_ensure_directory(save) || dm_android_fs_ensure_directory(temp) || dm_android_fs_ensure_directory(profile)) die("Android private directories");
-    setenv("DM_ROMFS",rom,1); setenv("DM_SAVE",save,1); setenv("DM_TEMP",temp,1);
+#ifdef DM_ANDROID_DEBUG_CONSOLE
+    if (dm_android_d2r_debug_configure(port_root,save,sizeof save)) die("Android debug configuration failed");
+#endif
+    setenv("DM_ROMFS",rom,1); setenv("DM_TEMP",temp,1);
     if (locale_tag[0]) setenv("DM_LANG", locale_tag, 1);
     /* Keep the portable Custom settings store beside the app's save tree,
      * matching iOS's Documents-level placement and making it available
      * before the guest mounts its save. */
     dm_custom_init(port_root);
     const char *custom_locale=NULL;
+    char overlay[4096]="";
 #ifdef DM_ANDROID_D2R_UI
-    char overlay[PATH_MAX];
-    if(dm_android_custom_overlay(port_root,overlay,sizeof overlay))setenv("DM_ROMFS_OVERLAY",overlay,1);
-    else unsetenv("DM_ROMFS_OVERLAY");
+    dm_android_custom_overlay(port_root,overlay,sizeof overlay);
     custom_locale=dm_android_custom_startup_locale();
 #endif
+    error=dm_android_mod_configure(port_root,overlay,sizeof overlay,save,sizeof save);
+    if(error)die("Android MOD package invalid or base overlay differs, error=%d; clear mods/active.txt to recover",error);
+    if(overlay[0])setenv("DM_ROMFS_OVERLAY",overlay,1);else unsetenv("DM_ROMFS_OVERLAY");
+    if (dm_android_fs_ensure_directory(save) || dm_android_fs_ensure_directory(temp) || dm_android_fs_ensure_directory(profile)) die("Android private directories");
+    setenv("DM_SAVE",save,1);
     const char *startup_locale=custom_locale?custom_locale:locale_tag;
     if(custom_locale) {setenv("DM_LANG",custom_locale,1);LOG("ANDROID_CUSTOM_LANGUAGE startup_locale=%s source=sw_custom.txt",custom_locale);}
     char private_vulkan[PATH_MAX];path(private_vulkan,sizeof private_vulkan,port_root,"diagnostics/private-vulkan");
@@ -613,11 +657,11 @@ static int copy_jstring(JNIEnv *env,jstring text,char *out,size_t cap) {
 }
 JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNIEnv *env,jclass cls,jstring files,jstring locale,jboolean touch_route) {
     (void)cls;
-    if (atomic_exchange(&configured,1)) { LOG("ANDROID_CONFIGURE rc=EALREADY"); return EALREADY; }
+    if (atomic_exchange(&configured,1)) return EALREADY;
     int rc=copy_jstring(env,files,app_files,sizeof app_files);
     if (!rc) rc=copy_jstring(env,locale,locale_tag,sizeof locale_tag);
-    if (rc || app_files[0]!='/') { fprintf(stderr,"[dm] ANDROID_CONFIGURE_FAIL path rc=%d first=%c\n",rc,app_files[0]?app_files[0]:'?'); return rc?rc:EINVAL; }
-    if (!touch_route) { fprintf(stderr,"[dm] ANDROID_CONFIGURE_FAIL touch_route\n"); return ENODEV; }
+    if (rc || app_files[0]!='/') return rc?rc:EINVAL;
+    if (!touch_route) return ENODEV;
     atomic_store(&input_route_ready,1);
     path(port_root,sizeof port_root,app_files,"d2r-mobile");
     if ((rc=configure_render_scale())) { LOG("ANDROID_3D_SCALE_CONFIG_FAILED errno=%d expected finite 0.50..1.0",rc); return rc; }
@@ -625,36 +669,12 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     unsetenv("DM_ANDROID_PRESENT_60FPS");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/present-60fps");
     if(access(driver_option,F_OK)==0)setenv("DM_ANDROID_PRESENT_60FPS","1",1);
-    /* 诊断开关：强制关掉原生 BC 采样，回到 CPU 解码路径（A/B 用）。
-     * Diagnostic switch: force native BC sampling off and go back to the CPU decode path (for A/B). */
-    path(driver_option,sizeof driver_option,port_root,"diagnostics/no-bc-native");
-    if(access(driver_option,F_OK)==0)setenv("DM_NO_BC_NATIVE","1",1);
-    /* 显式启用原生 BC 采样（默认关闭：Turnip 上画面会错，见 nvn_vk.c 的说明）。
-     * Explicitly enable native BC sampling (off by default: the picture is wrong on Turnip, see the
-     * note in nvn_vk.c). */
-    path(driver_option,sizeof driver_option,port_root,"diagnostics/bc-native");
-    if(access(driver_option,F_OK)==0)setenv("DM_BC_NATIVE","1",1);
-    /* present 模式：diagnostics/present-mode.txt 里写 fifo / mailbox / immediate。
-     * Present mode: write fifo / mailbox / immediate into diagnostics/present-mode.txt. */
-    unsetenv("DM_PRESENT_MODE");
-    path(driver_option,sizeof driver_option,port_root,"diagnostics/present-mode.txt");
-    { FILE *pm=fopen(driver_option,"r");
-      if(pm){char v[32];size_t n=fread(v,1,sizeof v-1,pm);v[n]=0;fclose(pm);
-        v[strcspn(v,"\r\n \t")]=0;
-        if(v[0])setenv("DM_PRESENT_MODE",v,1);} }
-    /* 出图间隔模式：diagnostics/present-interval.txt 里写 display（每节拍出一帧）或 game（原版语义）。
-     * 原版游戏把 nvnWindowBuilderSetPresentInterval 设成 2，即每 2 个显示节拍出一帧；在 60 Hz 节拍下
-     * 就等于 30 帧。写 display 会按每个节拍出一帧（上游把这条称为「剪口」：有意偏离原版）。
-     * Present interval mode: write display (one frame per tick) or game (the original semantics) into
-     * diagnostics/present-interval.txt. The original game calls nvnWindowBuilderSetPresentInterval(2),
-     * i.e. one frame every two display ticks, which on a 60 Hz cadence is exactly 30 fps. Writing
-     * display presents one frame per tick (upstream calls this a cut: an intentional deviation). */
-    unsetenv("DM_PRESENT_INTERVAL");
-    path(driver_option,sizeof driver_option,port_root,"diagnostics/present-interval.txt");
-    { FILE *pi=fopen(driver_option,"r");
-      if(pi){char v[32];size_t n=fread(v,1,sizeof v-1,pi);v[n]=0;fclose(pi);
-        v[strcspn(v,"\r\n \t")]=0;
-        if(v[0])setenv("DM_PRESENT_INTERVAL",v,1);} }
+    unsetenv("DM_DISABLE_PRESENT_60FPS");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-present-60fps");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_PRESENT_60FPS","1",1);
+    unsetenv("DM_DISABLE_PRESENT_CADENCE");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-present-cadence");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_PRESENT_CADENCE","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/private-vulkan");
     if(access(driver_option,F_OK)==0)setenv("DM_PRIVATE_VULKAN","turnip",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/private-vulkan-sysmem");
@@ -782,6 +802,13 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     unsetenv("DM_DISABLE_ASYNC_COMMIT");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-async-commit");
     if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_ASYNC_COMMIT","1",1);
+    unsetenv("DM_BC_PASSTHROUGH");unsetenv("DM_YIELD_BACKOFF");unsetenv("DM_TEXTURE_UPLOAD_BATCH");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-bc-passthrough");
+    if(access(driver_option,F_OK)==0)setenv("DM_BC_PASSTHROUGH","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-yield-backoff");
+    if(access(driver_option,F_OK)==0)setenv("DM_YIELD_BACKOFF","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-texture-upload-batch");
+    if(access(driver_option,F_OK)==0)setenv("DM_TEXTURE_UPLOAD_BATCH","0",1);
     unsetenv("DM_NVN_SYNC");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/nvn-sync");
     if(access(driver_option,F_OK)==0)setenv("DM_NVN_SYNC","1",1);
@@ -820,14 +847,47 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_SAMPLE_COPY_CACHE","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/skip-ps.txt");
     {FILE *sf=fopen(driver_option,"r");if(sf){char sk[17]={0};size_t n=fread(sk,1,16,sf);fclose(sf);if(n==16)setenv("DM_SKIP_PS",sk,1);}}
-    /* 跳过指定计算着色器的派发（绕开驱动编译缺陷；文件内容 = 16 位键） */
-    path(driver_option,sizeof driver_option,port_root,"diagnostics/skip-cs.txt");
-    {FILE *sf=fopen(driver_option,"r");if(sf){char sk[17]={0};size_t n=fread(sk,1,16,sf);fclose(sf);if(n==16)setenv("DM_SKIP_CS",sk,1);}}
     unsetenv("DM_EVENT_TRACE");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/event-trace");
     if(access(driver_option,F_OK)==0)setenv("DM_EVENT_TRACE","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/pass-timing");
     if(access(driver_option,F_OK)==0)setenv("DM_PASS_TIMING","1",1);
+    unsetenv("DM_PROTECT_AROUND");
+    marker_to_env("diagnostics/protect-around.txt","DM_PROTECT_AROUND",NULL);
+    unsetenv("DM_FAULT_AROUND");
+    marker_to_env("diagnostics/fault-around.txt","DM_FAULT_AROUND",NULL);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-fault-around");
+    if(access(driver_option,F_OK)==0){setenv("DM_FAULT_AROUND","1",1);setenv("DM_PROTECT_AROUND","1",1);}
+    unsetenv("DM_ENABLE_DYNAMIC_UBO");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-dynamic-ubo");
+    if(access(driver_option,F_OK)==0)setenv("DM_ENABLE_DYNAMIC_UBO","1",1);
+    unsetenv("DM_DESC_DIAG");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/desc-diag");
+    if(access(driver_option,F_OK)==0)setenv("DM_DESC_DIAG","1",1);
+    unsetenv("DM_DISABLE_SET_RECYCLE");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-set-recycle");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_SET_RECYCLE","1",1);
+    unsetenv("DM_DISABLE_RUNS_CACHE");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-runs-cache");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_RUNS_CACHE","1",1);
+    unsetenv("DM_DISABLE_SHADER_GET_CACHE");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-shader-get-cache");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_SHADER_GET_CACHE","1",1);
+    unsetenv("DM_DISABLE_SHADER_STAMP");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-shader-stamp");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_SHADER_STAMP","1",1);
+    unsetenv("DM_ACQUIRE_SYNC");
+    marker_to_env("diagnostics/acquire-sync.txt","DM_ACQUIRE_SYNC",NULL);
+    unsetenv("DM_FINALIZE_WAIT");
+    marker_to_env("diagnostics/finalize-wait.txt","DM_FINALIZE_WAIT",NULL);
+    unsetenv("DM_GUEST_WAIT_DIAG");
+    marker_to_env("diagnostics/guest-wait-diag","DM_GUEST_WAIT_DIAG","1");
+    unsetenv("DM_WSI_DIAG");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/wsi-diag");
+    if(access(driver_option,F_OK)==0)setenv("DM_WSI_DIAG","1",1);
+    unsetenv("DM_DRAW_TIMING");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/draw-timing");
+    if(access(driver_option,F_OK)==0)setenv("DM_DRAW_TIMING","1",1);
     unsetenv("DM_PASS_STATS");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/pass-stats");
     if(access(driver_option,F_OK)==0)setenv("DM_PASS_STATS","1",1);
@@ -837,75 +897,41 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     unsetenv("DM_PRESENT_FILTER");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/present-filter.txt");
     {FILE *pf=fopen(driver_option,"r");if(pf){char pv[16]={0};size_t pn=fread(pv,1,15,pf);fclose(pf);while(pn&&(pv[pn-1]=='\n'||pv[pn-1]=='\r'||pv[pn-1]==' '))pv[--pn]=0;if(pn)setenv("DM_PRESENT_FILTER",pv,1);}}
+    /* Attachment experiments are explicit. Never import the upstream defaults
+     * or old coverage seed as evidence for this renderer/driver. */
+    unsetenv("DM_ATT_LOAD_TABLE");unsetenv("DM_PASS_SENTINEL");unsetenv("DM_PASS_SENTINEL_SELFTEST");
+    unsetenv("DM_ATT_STORE_SKIP");unsetenv("DM_RENDER_TRAFFIC");unsetenv("DM_COV_TABLE_CONTROL");
+    unsetenv("DM_DISABLE_DYNAMIC_UBO");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-dynamic-ubo");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_DYNAMIC_UBO","1",1);
+    unsetenv("DM_DIAG_COPY_VIEW");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/diag-copy-view");
+    if(access(driver_option,F_OK)==0)setenv("DM_DIAG_COPY_VIEW","1",1);
+    unsetenv("DM_DISABLE_GLOBAL_PASS_CACHE");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/disable-global-pass-cache");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_GLOBAL_PASS_CACHE","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-att-load-table");
+    if(access(driver_option,F_OK)==0)setenv("DM_ATT_LOAD_TABLE","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/pass-sentinel");
+    if(access(driver_option,F_OK)==0)setenv("DM_PASS_SENTINEL","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/pass-sentinel-selftest");
+    if(access(driver_option,F_OK)==0){setenv("DM_PASS_SENTINEL","1",1);setenv("DM_PASS_SENTINEL_SELFTEST","1",1);}
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/enable-att-store-skip");
+    if(access(driver_option,F_OK)==0)setenv("DM_ATT_STORE_SKIP","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/render-traffic");
+    if(access(driver_option,F_OK)==0)setenv("DM_RENDER_TRAFFIC","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/cov-table.txt");
+    setenv("DM_COV_TABLE_CONTROL",driver_option,1);
+    unsetenv("DM_RESOLUTION_TIER");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/resolution-tier.txt");
+    {FILE *f=fopen(driver_option,"r");if(f){int v=fgetc(f),tail=fgetc(f);fclose(f);
+        if(v>='0'&&v<='2'&&(tail==EOF||tail=='\n')){char value[2]={(char)v,0};setenv("DM_RESOLUTION_TIER",value,1);}}}
     unsetenv("DM_DIAG_DUMP_FRAME");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/dump-frame.txt");
     {FILE *df=fopen(driver_option,"r");if(df){char dv[24]={0};size_t dn=fread(dv,1,23,df);fclose(df);if(dn)setenv("DM_DIAG_DUMP_FRAME",dv,1);}}
     unsetenv("DM_RENDER_SLOTS");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/render-slots.txt");
     {FILE *rf=fopen(driver_option,"r");if(rf){char rv[8]={0};size_t rn=fread(rv,1,7,rf);fclose(rf);if(rn)setenv("DM_RENDER_SLOTS",rv,1);}}
-    /* 渲染槽位复用的页粒度：diagnostics/slot-page-shift.txt 写 6..12。
-     * 越细位图越大、跨槽冲突越少（冲突时 CPU 要等整个槽的 GPU fence，是当前第一瓶颈）。
-     * 6 = 64 B（位图 ×4）、8 = 256 B（缺省）、10 = 1 KiB、12 = 4 KiB。
-     * Page granularity of the render-slot reuse bitmap: write 6..12 into
-     * diagnostics/slot-page-shift.txt. Finer means a bigger bitmap and fewer cross-slot conflicts
-     * (a conflict makes the CPU wait for that whole slot's GPU fence — the current top bottleneck).
-     * 6 = 64 B (bitmap ×4), 8 = 256 B (default), 10 = 1 KiB, 12 = 4 KiB. */
-    unsetenv("DM_SLOT_PAGE_SHIFT");
-    path(driver_option,sizeof driver_option,port_root,"diagnostics/slot-page-shift.txt");
-    {FILE *sf=fopen(driver_option,"r");if(sf){char sv[8]={0};size_t sn=fread(sv,1,7,sf);fclose(sf);if(sn)setenv("DM_SLOT_PAGE_SHIFT",sv,1);}}
-    /* 出图帧率上限：diagnostics/present-hz.txt 写一个整数（如 60 / 40 / 30）。
-     * 这是省电的主要手段——帧率降下来，CPU 与 GPU 的忙碌时间同比减少，机身温度和功耗都降。
-     * 120 Hz 竖屏上节拍器只取整数分之一（60 / 40 / 30），40 与 45 会落到同一档。
-     * Present frame-rate cap: write an integer (60 / 40 / 30) into diagnostics/present-hz.txt.
-     * This is the main power lever — a lower cap cuts CPU and GPU busy time proportionally, which
-     * lowers both temperature and draw. On a 120 Hz panel the pacer only takes integer fractions
-     * (60 / 40 / 30), so 40 and 45 land on the same tier. */
-    unsetenv("DM_PRESENT_HZ");
-    path(driver_option,sizeof driver_option,port_root,"diagnostics/present-hz.txt");
-    {FILE *hf=fopen(driver_option,"r");if(hf){char hv[8]={0};size_t hn=fread(hv,1,7,hf);fclose(hf);if(hn)setenv("DM_PRESENT_HZ",hv,1);}}
-    /* 触摸诊断：diagnostics/touch-trace 存在就记录每次按下落在哪个触屏控件上、
-     * 有没有转发给游戏 UI。菜单类界面点不动时，用它区分「被控件吃掉」和「事件没到」。
-     * Touch diagnostics: when diagnostics/touch-trace exists, record which touch control each
-     * press lands on and whether it was forwarded to the game UI. When a menu cannot be tapped
-     * this distinguishes "eaten by a control" from "the event never arrived". */
-    path(driver_option,sizeof driver_option,port_root,"diagnostics/touch-trace");
-    if(access(driver_option,F_OK)==0)setenv("DM_TOUCH_TRACE","1",1);
-    /* 点击诊断：diagnostics/click-trace 存在就记录每一次真正发出的界面点击及其坐标，
-     * 用来区分「点击没发出去」与「发出去了但游戏没响应」。
-     * Click diagnostics: when diagnostics/click-trace exists, log every UI click actually sent and
-     * its coordinates, to tell "never sent" apart from "sent but ignored". */
-    path(driver_option,sizeof driver_option,port_root,"diagnostics/click-trace");
-    if(access(driver_option,F_OK)==0)setenv("DM_CLICK_TRACE","1",1);
-    /* 细分性能剖析：diagnostics/profile-detail 存在就打开逐项计时（lookup / pool / bind /
-     * renderpass / desc_alloc / desc_update / prep）。不开时这些值恒为 0，看不出热点在哪。
-     * Fine-grained profiling: diagnostics/profile-detail turns on per-phase timing (lookup / pool /
-     * bind / renderpass / desc_alloc / desc_update / prep). Without it those values stay 0 and the
-     * hot spot is invisible. */
-    path(driver_option,sizeof driver_option,port_root,"diagnostics/profile-detail");
-    if(access(driver_option,F_OK)==0)setenv("DM_PROFILE_DETAIL","1",1);
-    /* pool 诊断开关：pool-range-stats 报告每档大小的读次数；no-dirty-uploads 关掉脏页增量上传，
-     * 用来 A/B 判断 pool_ms 是不是脏页追踪造成的。
-     * Pool diagnostics: pool-range-stats reports read counts per size bucket; no-dirty-uploads
-     * disables incremental dirty-page upload, for A/B testing whether pool_ms comes from dirty
-     * tracking. */
-    path(driver_option,sizeof driver_option,port_root,"diagnostics/pool-range-stats");
-    if(access(driver_option,F_OK)==0)setenv("DM_POOL_RANGE_STATS","1",1);
-    path(driver_option,sizeof driver_option,port_root,"diagnostics/no-dirty-uploads");
-    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_DIRTY_UPLOADS","1",1);
-    /* UI 树探查：diagnostics/ui-dump.txt 里写「面板名」或「动作:面板名」，配合 ui-dump-at.txt 的
-     * 触发消息；命中后第 45 帧把该控件的可见子树打出来（名字、可见、虚表、子控件数）。
-     * 用来摸清某个面板（如传送点）的控件结构，好给它写触摸点选。
-     * UI tree probing: put a panel name, or action:panel, in diagnostics/ui-dump.txt together with a
-     * trigger message in ui-dump-at.txt; on frame 45 after the hit the widget's visible subtree is
-     * dumped (name, visibility, vtable, child count). Used to learn a panel's widget structure (for
-     * example the waypoint page) so touch selection can be written for it. */
-    unsetenv("DM_UI_DUMP");unsetenv("DM_UI_TAPS_AT");
-    path(driver_option,sizeof driver_option,port_root,"diagnostics/ui-dump.txt");
-    {FILE *uf=fopen(driver_option,"r");if(uf){char uv[64]={0};size_t un=fread(uv,1,63,uf);fclose(uf);if(un)uv[un]=0;
-      uv[strcspn(uv,"\r\n")]=0;if(uv[0])setenv("DM_UI_DUMP",uv,1);}}
-    path(driver_option,sizeof driver_option,port_root,"diagnostics/ui-dump-at.txt");
-    {FILE *af=fopen(driver_option,"r");if(af){char av[64]={0};size_t an=fread(av,1,63,af);fclose(af);if(an)av[an]=0;
-      av[strcspn(av,"\r\n")]=0;if(av[0])setenv("DM_UI_TAPS_AT",av,1);}}
     unsetenv("DM_ADAPTED_SHADER_DIR");unsetenv("DM_DIAG_LOD_BIAS");unsetenv("DM_SHADER_OVERRIDE_DIR");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/shader-override");
     if(access(driver_option,F_OK)==0)setenv("DM_SHADER_OVERRIDE_DIR",driver_option,1);
@@ -914,6 +940,10 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     path(driver_option,sizeof driver_option,port_root,"diagnostics/lod-bias.txt");
     {FILE *lf=fopen(driver_option,"r");if(lf){char lv[16]={0};size_t ln=fread(lv,1,15,lf);fclose(lf);if(ln)setenv("DM_DIAG_LOD_BIAS",lv,1);}}
     /* Hint sessions are an explicit A/B experiment, off when the marker is absent. */
+    unsetenv("DM_HINT_TARGET_NS");unsetenv("DM_TRANSLATE_AFFINITY");unsetenv("DM_ACQUIRE_AFFINITY");
+    marker_to_env("diagnostics/hint-target-ns.txt","DM_HINT_TARGET_NS",NULL);
+    marker_to_env("diagnostics/translate-affinity.txt","DM_TRANSLATE_AFFINITY",NULL);
+    marker_to_env("diagnostics/acquire-affinity.txt","DM_ACQUIRE_AFFINITY",NULL);
     unsetenv("DM_PERFORMANCE_HINTS");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/performance-hints");
     if(access(driver_option,F_OK)==0)setenv("DM_PERFORMANCE_HINTS","1",1);
@@ -925,17 +955,6 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     if(access(driver_option,F_OK)==0)setenv("DM_DIAG_BARRIER","2",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/barrier-stats");
     if(access(driver_option,F_OK)==0)setenv("DM_BARRIER_STATS","1",1);
-    /* 渲染槽位数：diagnostics/render-slots.txt 写 1..4。槽位多了可以让 CPU 提交与 GPU 执行重叠，
-     * 但每个槽有独立资源缓存，开太大会涨显存。默认 1（上游缺省）。
-     * Render slot count: write 1..4 into diagnostics/render-slots.txt. More slots let CPU submission
-     * overlap GPU execution, but each slot owns a resource cache, so too many costs memory.
-     * Defaults to 1 (the upstream default). */
-    unsetenv("DM_RENDER_SLOTS");
-    path(driver_option,sizeof driver_option,port_root,"diagnostics/render-slots.txt");
-    { FILE *rs=fopen(driver_option,"r");
-      if(rs){char v[16];size_t n=fread(v,1,sizeof v-1,rs);v[n]=0;fclose(rs);
-        v[strcspn(v,"\r\n \t")]=0;
-        if(v[0])setenv("DM_RENDER_SLOTS",v,1);} }
     char logs[PATH_MAX], log[PATH_MAX], shaders[PATH_MAX];
     path(logs,sizeof logs,port_root,"diagnostics");
     setenv("DM_FRAME_DIR",logs,1);
@@ -1038,15 +1057,6 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeTouch(JNIEnv 
 JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeStart(JNIEnv *env,jclass cls) {
     (void)env;(void)cls;
     if (!atomic_load(&configured)) return ENODEV;
-    /* 没有内容清单里的镜像尺寸就不启动客体：原生层没有默认镜像，只有在 nativeContentProfile
-     * 交来已验证尺寸后才允许拉起游戏线程，否则 game_thread 会拿 0 去比对真实文件而必然失败。
-     * Never start the guest without an image size from the content manifest: the native layer has no
-     * default image, so the game thread may only start once nativeContentProfile has supplied the
-     * verified size; otherwise it compares 0 against the real file and always fails. */
-    { pthread_mutex_lock(&state_lock);
-      uint64_t ready_bytes = content_romfs_bytes;
-      pthread_mutex_unlock(&state_lock);
-      if (!ready_bytes) { LOG("ANDROID_START_DEFERRED content profile not supplied yet"); return EAGAIN; } }
     pthread_mutex_lock(&focus_lock);
     pthread_mutex_lock(&state_lock);
     if (shutdown_requested || activity_focus!=1 || atomic_load(&lifecycle_focus)!=1 || !native_window) {
@@ -1108,6 +1118,24 @@ JNIEXPORT jstring JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeStatus(JNI
     (void)cls;char text[8192];
     status_text(text,sizeof text);
     persist_status();return (*env)->NewStringUTF(env,text);
+}
+JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeMapReveal(JNIEnv *env,jclass cls) {
+    (void)env;(void)cls;
+#ifdef DM_ANDROID_D2R_UI
+    return dm_android_map_request(NULL);
+#else
+    return ENOTSUP;
+#endif
+}
+JNIEXPORT jlongArray JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeMapStatus(JNIEnv *env,jclass cls) {
+    (void)cls;jlong values[8]={0};
+#ifdef DM_ANDROID_D2R_UI
+    dm_android_map_status s;dm_android_map_status_get(&s);
+    values[0]=s.sequence;values[1]=s.state;values[2]=s.area;values[3]=s.total;
+    values[4]=s.done;values[5]=s.ready;values[6]=s.error;
+#endif
+    jlongArray out=(*env)->NewLongArray(env,8);
+    if(out)(*env)->SetLongArrayRegion(env,out,0,8,values);return out;
 }
 JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeRenderScale(JNIEnv *env,jclass cls,jfloat scale) {
     (void)env;(void)cls;
