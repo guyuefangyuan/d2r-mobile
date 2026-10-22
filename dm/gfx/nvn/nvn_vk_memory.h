@@ -21,6 +21,19 @@ typedef struct {
 } DmVkMemoryStats;
 enum {
     DM_VK_TRIM_RETIRED=1u, DM_VK_TRIM_DERIVED=2u, DM_VK_TRIM_WRITEBACK=4u,
+    /* 池镜像（guest 内存的 Vulkan 副本，进局后实测常驻 1.1 GB 以上）。
+     * 它是 guest 内存的副本、随时可用 pool_materialize 重建，所以切后台时可以整块丢掉：
+     * 进程 PSS 从 1.9 GB 降下来，系统就不会因内存压力把进程杀掉，回前台不用重新进局。
+     * 代价是回来的第一帧要把用到的部分重新上传（比重新加载整个游戏快得多）。
+     * 只在「已确认没有在飞/录制中的提交」时允许（trim 本身已做这项检查）。
+     * The pool mirror (Vulkan copies of guest memory; 1.1 GB+ resident once in a run). It is a copy
+     * of guest memory and can always be rebuilt by pool_materialize, so it can be dropped whole
+     * while in the background: process PSS falls from 1.9 GB, the system no longer kills the
+     * process under memory pressure, and returning to the foreground does not restart the run. The
+     * cost is re-uploading the parts actually used on the first frame back, which is far cheaper
+     * than reloading the whole game. Only allowed when no submission is in flight or recording
+     * (trim already checks that). */
+    DM_VK_TRIM_POOLS=8u,
     DM_VK_TRIM_ALL=7u
 };
 

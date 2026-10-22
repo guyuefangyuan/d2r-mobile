@@ -932,8 +932,7 @@ static _Atomic int g_tab_delta, g_tab_top, g_tab_left; static _Atomic uint64_t g
 // NPC dialog menu (Talk / Trade or Repair / Imbue / Cancel): the options are ListItemK in the Container under NpcDialogPanel (row height 72 units, about 3 mm on a phone) and do not respond to mouse clicks
 // (changing isHoverList in the layout has no effect either); D-pad up/down moves the highlight and A confirms; pushing the stick jumps all the way to the end and cannot be used. Highlighted item = the row whose text color differs from the rest (+0xbc); recognize by "blue greater than red" first, and by difference only if that fails.
 // Whichever row is tapped (widened up and down to the nearest row) → D-pad × delta, then press A.
-static int npc_menu_rows(uint64_t root, uint64_t pn, int x, int y, int vh, int *delta);
-// 菜单自己记的当前选中行：面板 +0x248 = 它的列表控件（ListWidget，虚表 main+0x20b8df0），列表 +0xd0 = 那个 Container，+0x140 = 选中下标（0 起，-1 = 没有选中）。
+static int npc_menu_rows(uint64_t root, uint64_t pn, int x, int y, int vh, int *delta);// 菜单自己记的当前选中行：面板 +0x248 = 它的列表控件（ListWidget，虚表 main+0x20b8df0），列表 +0xd0 = 那个 Container，+0x140 = 选中下标（0 起，-1 = 没有选中）。
 // 方向键上 / 下改的就是它（列表消息处理 main+0xacbab4–0xacbb04），确认键按它定执行哪一项（面板 main+0x3daf4c 起）；各行的文字颜色只是它每帧的投影（main+0xac0da8）。
 // 返回 1 = 读到了（*cur 可为 -1）；0 = 结构对不上（列表指针 / 虚表 / Container 不符）
 // The currently selected row as recorded by the menu itself: panel +0x248 = its list widget (ListWidget, vtable main+0x20b8df0), list +0xd0 = that Container, +0x140 = selected index (0-based, -1 = no selection).
@@ -1007,6 +1006,7 @@ static int npc_menu_rows(uint64_t root, uint64_t pn, int x, int y, int vh, int *
     LOG("界面对话菜单：%llu 行，点中第 %d 行（%s）%s，选中行 %d（%s%s）", (unsigned long long)n, hit, hnm, used ? "（触点在行外，就近）" : "", cur, have ? "菜单自己记的" : "【红】列表结构对不上，按文字颜色认的", have && col_cur != cur ? "；按颜色认会是另一行" : ""); }
     *delta = hit - cur; return 1;
 }
+
 
 // 模态框在最上层时，框外的触摸不进底下的面板（提取框开着时去拖背包物品，松手那下确认键被数量框吃掉 = 点了「好」，
 // 箱子里 60457 金币被全取走；mini 上复现）。最上层那个面板名字以 Modal 结尾且有可见内容 = 模态框；
@@ -2826,7 +2826,27 @@ void dm_ui_mouse_pump(void) {   // 游戏取手柄处调（hle_hid fill，主线
         snapped = r; }
     static int hov; static uint64_t hov_xy; if (r != hov_xy) { hov_xy = r; hov = 0; }
     if (ph == 1) hov++;
+    /* 诊断：把每次泵进入时的相位与悬停计数打出来（含被 hov<2 拦掉的那些）。
+     * 只打前若干条，避免刷屏。DM_CLICK_TRACE=1 打开。
+     * Diagnostics: log the phase and hover count on every pump entry, including the entries that
+     * hov<2 drops. Capped to avoid flooding. Enable with DM_CLICK_TRACE=1. */
+    if (getenv("DM_CLICK_TRACE")) {
+        static int logged;
+        if (logged < 80) { logged++; LOG("CLICK_PUMP ph=%d hov=%d x=%d y=%d r=%llx", ph, hov, x, y, (unsigned long long)r); }
+    }
     if (ph == 2 && hov < 2) { hov++; return; }
+    /* 诊断：把每次真实发出的点击和它的位置打出来。菜单点不动时，看这一行有没有出现，
+     * 就能区分「点击没发出去（被 hov<2 或 snap 拦掉）」与「发出去了但游戏没响应」。
+     * DM_CLICK_TRACE=1 打开；每次按下只打一条。
+     * Diagnostics: log every click that is actually sent, with its position. When a menu cannot be
+     * tapped, whether this line appears separates "the click never went out" (blocked by hov<2 or
+     * snap) from "it went out but the game ignored it". Enable with DM_CLICK_TRACE=1; one line per
+     * press. */
+    if (ph == 2 && getenv("DM_CLICK_TRACE")) {
+        static uint64_t last_r; static int logged;
+        if (last_r != r && logged < 120) { logged++; last_r = r;
+            LOG("CLICK_SEND x=%d y=%d hov=%d panel_state=%d", x, y, hov, dm_ui_panel_state()); }
+    }
     if (ph == 2 && atomic_load(&g_cc_open) && !atomic_load(&g_fe_opt_open) && !atomic_load(&g_fe_name_open) && !atomic_load(&g_fe_confirm_open)) {   // 职业选择页（上面没盖着模式页 / 起名页 / 弹窗）：这次点的若是别的职业，先让正在出列的那位归队（见上） | class selection page (not covered by the mode page / naming page / a popup): if this tap is on a different class, first have the one currently stepping forward return to the lineup (see above)
         uint64_t pn = ui_find(root, "CharacterCreatePanel", 0), xy = (uint64_t)(uint32_t)x | ((uint64_t)(uint32_t)y << 32), ws[8]; int hit = -1;
         for (int i = 0; pn && i < 8; i++) { ws[i] = ui_find(pn, k_cc_class[i], 0); if (ws[i] && hit < 0 && (((int (*)(uint64_t, uint64_t))*(uint64_t *)(*(uint64_t *)ws[i] + 0x48))(ws[i], xy) & 1)) hit = i; }

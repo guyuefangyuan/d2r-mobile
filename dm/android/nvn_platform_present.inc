@@ -127,7 +127,20 @@ void dm_gfx_suspend(int on) {
     pthread_mutex_unlock(&android_suspend_mu);if(on){
         x_drain();dm_android_nvn_work_reset(0);mtl_drain();dm_vk_pipeline_cache_save();
         DmVkMemoryStats memory;
-        int error=dm_vk_memory_trim_caches(DM_VK_TRIM_ALL,&memory);
+        /* 切后台时把池镜像也丢掉（DM_VK_TRIM_POOLS）：那 1.1 GB 是 guest 内存的副本，
+         * 留着只会让进程 PSS 停在 1.9 GB 左右，而 Android 在内存压力下会直接杀进程
+         * ——回前台就变成重新进局。丢掉之后 PSS 大幅下降，进程能活下来；回到前台的
+         * 第一帧由 pool_materialize 按需重建并重新上传用到的部分。
+         * 实测（骁龙 8G3 平板 8 GB）：丢之前 MemFree 只剩 131 MB，系统 lowmemorykiller
+         * 连续触发后进程被杀（PID 变化、status.json 消失）。
+         * Drop the pool mirror as well when going to the background (DM_VK_TRIM_POOLS): those
+         * 1.1 GB are copies of guest memory, and keeping them holds process PSS near 1.9 GB while
+         * Android kills the process under memory pressure — coming back then means restarting the
+         * run. Dropping them cuts PSS sharply so the process survives, and the first frame back
+         * rebuilds and re-uploads only the parts actually used. Measured on a Snapdragon 8G3
+         * tablet with 8 GB: before the drop MemFree was down to 131 MB and lowmemorykiller
+         * fired repeatedly until the process died (PID changed, status.json gone). */
+        int error=dm_vk_memory_trim_caches(DM_VK_TRIM_ALL|DM_VK_TRIM_POOLS,&memory);
         if(!error)LOG("ANDROID_GPU_CACHE_TRIM freed=%llu remaining=%llu count=%llu",
             (unsigned long long)memory.last_trim_freed_bytes,
             (unsigned long long)memory.total_bytes,(unsigned long long)memory.trim_count);
@@ -192,12 +205,29 @@ void nvn_present_config(int hz,int display_intervals) {if(hz<0 || hz>1000)die("N
 static uint64_t android_present_period(const win_t *w) {
     if(android_present_hz<0) {const char *e=getenv("DM_PRESENT_HZ");android_present_hz=e?atoi(e):60;
         android_display_intervals=mtl_has_window();}
+    /* 游戏把 nvnWindowBuilderSetPresentInterval 设成 2，即「每 2 个显示节拍出一帧」，
+     * 在 60 Hz 节拍下就是 30 帧。iOS 那边早就把这条当成「剪口」绕过了（DM_PRESENT_INTERVAL=display
+     * 时 itv 固定为 1，见 hle_nvn.c 的 present_period），Android 却一直照游戏给的间隔算，
+     * 这是两端帧率差异的直接原因之一。这里默认忽略游戏设的间隔（每个节拍出一帧 = 60 帧）；
+     * 想看原版语义可以设 DM_ANDROID_GUEST_INTERVAL=1。
+     * The game calls nvnWindowBuilderSetPresentInterval(2), i.e. one frame every two display ticks,
+     * which on a 60 Hz cadence is exactly 30 fps. iOS has long bypassed this as a "cut"
+     * (with DM_PRESENT_INTERVAL=display the interval is pinned to 1, see present_period in hle_nvn.c),
+     * while Android kept honouring the guest's interval — one direct cause of the frame-rate gap.
+     * Ignore the guest interval by default (one frame per tick = 60 fps); set
+     * DM_ANDROID_GUEST_INTERVAL=1 to get the original semantics back. */
+    { static int guest_interval_policy=-1;
+      if(guest_interval_policy<0){const char *e=getenv("DM_ANDROID_GUEST_INTERVAL");guest_interval_policy=e&&atoi(e)?1:0;}
+      if(!guest_interval_policy)android_display_intervals=0; }
     if(android_present_fixed_60<0)android_present_fixed_60=getenv("DM_ANDROID_PRESENT_60FPS")!=NULL;
     uint64_t period=dm_android_present_period_ns(android_present_hz,android_display_intervals,w->interval,android_present_fixed_60);
-    /* Read applied settings on every frame. Apply/Discard keep their shared
-     * semantics; the explicit fixed60 diagnostic retains precedence. */
+    /* 每帧读一次已生效的设置；「应用 / 放弃」的语义不变，fixed60 诊断开关优先级最高。
+     * 传的是目标帧率本身（60 / 40 / 30），不是「是不是 30」的布尔值——三档都靠它封顶。
+     * Read the applied settings once per frame; Apply/Discard keep their semantics and the fixed60
+     * diagnostic switch keeps precedence. The value passed is the target frame rate itself
+     * (60 / 40 / 30), not a boolean "is it 30" — all three tiers are capped through it. */
     if(!android_present_fixed_60 && dm_android_d2r_fps_setting)
-        period=dm_android_present_power_period_ns(period,dm_android_d2r_fps_setting()==30);
+        period=dm_android_present_power_period_ns(period,dm_android_d2r_fps_setting());
     return period;
 }
 static void android_present_log(const win_t *w) {

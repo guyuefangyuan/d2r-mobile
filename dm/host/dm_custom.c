@@ -20,15 +20,19 @@
 #include <stdio.h>
 #include <string.h>
 
-static const char *const k_keys[] = { "lang_en", "auto_mana", "merc_pot", "drop_light", "map_mark", "item_notes", "icloud", "pot_pick", "drop_haptic", "gem_pick", "store_btn", "eco_fps", "q3d", "loot_filter", "auto_buff", "touch_swap_above" };   // 顺序 = 自定义页从上到下的行序（touch_layout.py _CUSTOM_ROWS）：手柄在这页按这个顺序上下选行 | Order = row order of the Custom page from top to bottom (touch_layout.py _CUSTOM_ROWS): the controller selects rows up/down on this page in this order
+static const char *const k_keys[] = { "lang_en", "auto_mana", "merc_pot", "drop_light", "map_mark", "item_notes", "icloud", "pot_pick", "drop_haptic", "gem_pick", "store_btn", "eco_fps", "fps40", "q3d", "loot_filter", "auto_buff", "touch_swap_above" };   // 顺序 = 自定义页从上到下的行序（touch_layout.py _CUSTOM_ROWS）：手柄在这页按这个顺序上下选行 | Order = row order of the Custom page from top to bottom (touch_layout.py _CUSTOM_ROWS): the controller selects rows up/down on this page in this order
 #define NK (int)(sizeof k_keys / sizeof *k_keys)
-static const int k_def[NK] = { 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0 };   // 缺省值：省电模式（30 帧）缺省关、3D 画质缺省流畅优先（q3d=0），换组默认在传送门左侧，其余缺省开 | Defaults: power-saving mode (30 fps) off, 3D quality smoothness first (q3d=0), switch left of portal by default, everything else on
+static const int k_def[NK] = { 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0 };   // 缺省值：省电模式（30 帧）与 40 帧档缺省关（= 60 帧）、3D 画质缺省流畅优先（q3d=0），换组默认在传送门左侧，其余缺省开 | Defaults: power-saving (30 fps) and the 40 fps tier off (= 60 fps), 3D quality smoothness first (q3d=0), switch left of portal by default, everything else on
 // q3d（3D 画质）：0 = 流畅优先（掉帧就自动降 3D 比例）、1 = 画质优先（不自动降）。生效 = 调 hle_oe.c 的 dm_3d_quality_mode_set，读盘与点「应用」时当场调，下一帧控制器就按新档走。
 // 页上是上下两项单选（同语言行）：TouchCustom_q3d 是「画质优先」那格（勾上 = 1），TouchCustom_q3d_smooth 是它的反面
 // q3d (3D quality): 0 = smoothness first (automatically lowers the 3D scale on frame drops), 1 = quality first (no automatic lowering). Applied by calling hle_oe.c's dm_3d_quality_mode_set, immediately on load and on tapping "Apply", so the controller follows the new setting from the next frame.
 // On the page it is a stacked two-option radio (like the language row): TouchCustom_q3d is the "Quality first" cell (checked = 1), TouchCustom_q3d_smooth is its inverse
-#define K_Q3D 12
-#define K_TOUCH_SWAP 15
+/* 键表里 q3d 与 touch_swap_above 的下标。插了 fps40（在 eco_fps 之后）之后，
+ * 这两个下标各往后挪一位；改了 k_keys 的顺序就要同步改这里。
+ * Indices of q3d and touch_swap_above in the key table. Inserting fps40 right after eco_fps moved
+ * both by one; reordering k_keys requires updating these. */
+#define K_Q3D 13
+#define K_TOUCH_SWAP 16
 void dm_3d_quality_mode_set(int mode);
 static const char *rev_box(int i) { return i == 0 ? "TouchCustom_lang_zh" : i == K_Q3D ? "TouchCustom_q3d_smooth" : i == K_TOUCH_SWAP ? "TouchCustom_touch_swap_above_near" : NULL; }   // 单选行「反面那一项」的勾选框 | Checkbox of the radio row's "inverse option"
 static _Atomic int g_val[NK];        // 已生效：1 开 / 0 关 | In effect: 1 on / 0 off
@@ -85,7 +89,29 @@ int dm_custom_lang_explicit(void) {
      * Android's generic mount separately requires the verified D2R hook. */
     load_once(); return atomic_load(&g_loaded) ? atomic_load(&g_lang_explicit) : -1;
 }
-int dm_fps_setting(void) { return dm_custom_get("eco_fps") ? 30 : 60; }   // 图形层 nvn_mtl.m mtl_fps_target 每帧读（弱符号的强定义） | Read every frame by mtl_fps_target in the graphics layer nvn_mtl.m (strong definition of a weak symbol)
+/* 出图帧率档位，每帧被图形层读一次（弱符号 dm_android_d2r_fps_setting 的强定义）。
+ * 三档：
+ *   eco_fps 开          → 30 帧（最省电，温度最低）
+ *   fps40 开、eco_fps 关 → 40 帧（推荐：省电与流畅的平衡，且 40 是 120 Hz 的整数分之一，节奏最稳）
+ *   两个都关            → 60 帧（性能优先）
+ * eco_fps 优先于 fps40：两个都勾上时按更省电的那档算。
+ * 为什么不用一个「三档」键：dm_custom 的存档解析只把值归一成 0 / 1（load_once 里 v[i] = eq[1] != '0'），
+ * 存不下 2；而且选项页每行就是一个原版勾选框，一个键只能对应一格。所以用两个布尔键组合。
+ * The present frame-rate tier, read once per frame by the graphics layer (strong definition of the
+ * weak symbol dm_android_d2r_fps_setting). Three tiers:
+ *   eco_fps on            -> 30 fps (most power-saving, lowest temperature)
+ *   fps40 on, eco_fps off -> 40 fps (recommended: the balance, and 40 is an integer fraction of
+ *                            120 Hz, so the pacing is the steadiest)
+ *   both off              -> 60 fps (performance first)
+ * eco_fps wins over fps40: with both checked the more power-saving tier applies.
+ * Why not one "three-value" key: dm_custom's save parser normalises every value to 0 / 1
+ * (v[i] = eq[1] != '0' in load_once), so it cannot hold 2; and each row of the options page is one
+ * original-game checkbox, so one key is one cell. Two boolean keys composed instead. */
+int dm_fps_setting(void) {
+    if (dm_custom_get("eco_fps")) return 30;
+    if (dm_custom_get("fps40")) return 40;
+    return 60;
+}
 static void save(void) {
     char p[1100], t[1120]; if (!file_path(p, sizeof p)) { LOG("【红】自定义设置：存档目录没挂上，没存盘"); return; }
     snprintf(t, sizeof t, "%s.tmp", p); FILE *f = fopen(t, "w"); int ok = f != NULL;

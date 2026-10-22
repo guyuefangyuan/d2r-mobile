@@ -122,12 +122,38 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY|View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN|View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
         FrameLayout root=new FrameLayout(this);root.setBackgroundColor(0xff0d0d0f);
+        /* 覆盖层按钮按「画面」而不是「绝对 dp」缩放。16:9 画面在平板上宽 1280dp、在手机
+         * （560dpi、2640x1216）上只有 617dp：同一份绝对 dp 尺寸在手机上相对画面大一倍，
+         * 「返回」「确认」正好压在游戏自己的「创建新角色」上，把那个按钮挡住了。
+         * 按 画面宽 / 1280dp 缩放后两台设备的比例一致；下限 0.62 是为了保住手指能按的触控面积
+         * （手机约 42x36dp），否则按钮会小到 8mm 以下。
+         * Scale the overlay controls by the picture instead of by absolute dp. The 16:9 picture is
+         * 1280dp wide on the tablet but only 617dp on the phone (560dpi, 2640x1216), so the same
+         * absolute dp makes every button twice as large relative to the picture there — and 返回 /
+         * 确认 end up covering the game's own 创建新角色 button. Scaling by picture width / 1280dp
+         * fixes the proportion; the 0.62 floor keeps the touch targets finger-sized (~42x36dp,
+         * without it they would fall under 8mm). */
+        { android.util.DisplayMetrics metrics=getResources().getDisplayMetrics();
+          int[] picture=GameDisplayMetrics.fitGame(metrics.widthPixels,metrics.heightPixels);
+          overlayScale=Math.max(0.62f,Math.min(1f,picture[0]/metrics.density/1280f)); }
         GameViewport viewport=new GameViewport(this);
         root.addView(viewport,new FrameLayout.LayoutParams(-1,-1,Gravity.CENTER));
         game=new SurfaceView(this);game.setContentDescription(t("游戏画面"));game.getHolder().addCallback(this);
         game.setOnTouchListener((view,event) -> {
             if(!configured||!surfaceReady||!inputReady||width<=0||height<=0)return true;
-            if(!touchMode) setTouchMode(true);
+            /* 不要在这里强制切回触摸操控：原先无条件是 if(!touchMode) setTouchMode(true)，
+             * 结果玩家一点「菜单操控」（切出方向键 / 确认 / 返回那组按钮，并关掉摇杆技能圈），
+             * 只要手指再碰到画面任何一处就会被弹回触摸操控——菜单操控根本用不了。
+             * 那个自动切换只在前端（未进局）有意义：那时还没有摇杆，第一次摸屏就当开始操作。
+             * 进局之后由玩家自己用左上角的按钮决定，这里一律不再改。
+             * Do not force the touch mode back here. It used to be an unconditional
+             * if(!touchMode) setTouchMode(true), so once the player picked 「菜单操控」(which reveals
+             * the D-pad / confirm / back buttons and hides the sticks and skill rings) any further
+             * touch on the picture snapped it back to touch controls — menu controls were unusable.
+             * That automatic switch only makes sense before entering the game, when there are no
+             * sticks yet and the first screen touch means "start using Touch". Once in game the
+             * top-left button is the player's choice and nothing here overrides it. */
+            if(!touchMode && !inGame) setTouchMode(true);
             // The SurfaceView owns this contact after DOWN even when the
             // overlay becomes visible. Forward the whole first gesture too.
             if(touchControls!=null)return touchControls.onTouchEvent(event);
@@ -151,21 +177,31 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         addAction(viewport,"←",1L<<12,Gravity.LEFT|Gravity.BOTTOM,18,55);
         addAction(viewport,"→",1L<<14,Gravity.LEFT|Gravity.BOTTOM,166,55);
         touchControls=new TouchControlsView(this,() -> inputReady&&resumed&&!failed,strings);
+        /* touchActivation 只在「触摸操控」模式下生效。原先只要进局就返回 true 并 setTouchMode(true)，
+         * 而 TouchControlsView 是覆盖全屏的，于是菜单操控模式下随便点一下画面也会被这条拽回触摸操控
+         * ——和上面的 setOnTouchListener 是同一个 bug 的第二个入口。
+         * 现在：菜单操控（touchMode=false）时这里直接返回 false，不接管任何触点，方向键按钮才点得动。
+         * touchActivation applies only in touch-control mode. It used to return true and call
+         * setTouchMode(true) whenever the game was running, and since TouchControlsView covers the
+         * whole screen, any tap in menu-control mode was dragged back to touch controls — the second
+         * entry point of the same bug as the setOnTouchListener above. Now, in menu-control mode
+         * (touchMode=false) it returns false and claims no contacts, so the D-pad buttons work. */
         touchControls.setTouchActivation(() -> {
-            if(inGame&&gameInputReady()){setTouchMode(true);return true;}
+            if(!touchMode) return false;
+            if(inGame&&gameInputReady())return true;
             return false;
         });
         viewport.addView(touchControls,new FrameLayout.LayoutParams(-1,-1));
-        TextView mode=new TextView(this);modeControl=mode;mode.setText(strings.modeLabel(touchMode));mode.setTextColor(0xffe9d9ba);mode.setTextSize(16);
+        TextView mode=new TextView(this);modeControl=mode;mode.setText(strings.modeLabel(touchMode));mode.setTextColor(0xffe9d9ba);mode.setTextSize(16f*overlayScale);
         mode.setGravity(Gravity.CENTER);mode.setBackgroundColor(0x8030241b);mode.setContentDescription(strings.modeDescription(touchMode));mode.setClickable(true);mode.setFocusable(true);
-        FrameLayout.LayoutParams modeParams=new FrameLayout.LayoutParams(dp(100),dp(48),Gravity.LEFT|Gravity.TOP);modeParams.leftMargin=dp(18);modeParams.topMargin=dp(18);
+        FrameLayout.LayoutParams modeParams=new FrameLayout.LayoutParams(overlayPx(100),overlayPx(48),Gravity.LEFT|Gravity.TOP);modeParams.leftMargin=overlayPx(18);modeParams.topMargin=overlayPx(18);
         mode.setOnClickListener(v -> setTouchMode(!touchMode));
         viewport.addView(mode,modeParams);
         Button system=new Button(this);systemControl=system;
-        refreshSystemLabel();system.setTextColor(TouchControlsView.TEXT);system.setTextSize(16);
+        refreshSystemLabel();system.setTextColor(TouchControlsView.TEXT);system.setTextSize(16f*overlayScale);
         system.setBackgroundTintList(ColorStateList.valueOf(TouchControlsView.INK));
-        FrameLayout.LayoutParams systemParams=new FrameLayout.LayoutParams(dp(80),dp(48),Gravity.LEFT|Gravity.TOP);
-        systemParams.leftMargin=dp(134);systemParams.topMargin=dp(18);
+        FrameLayout.LayoutParams systemParams=new FrameLayout.LayoutParams(overlayPx(80),overlayPx(48),Gravity.LEFT|Gravity.TOP);
+        systemParams.leftMargin=overlayPx(134);systemParams.topMargin=overlayPx(18);
         system.setOnClickListener(v -> {
             if(!configured||failed||rendererSettings!=null||keyboardDialog!=null||saveFailureDialog!=null)return;
             actionButtons=0;if(inputReady)nativeActions(0,0,0,0,0);touchControls.cancel();
@@ -175,19 +211,19 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         });
         viewport.addView(system,systemParams);
         fps=new TextView(this);fps.setText("FPS —");fps.setTextColor(TouchControlsView.TEXT);
-        fps.setTextSize(12);fps.setTypeface(Typeface.MONOSPACE);fps.setGravity(Gravity.CENTER);
-        fps.setMinWidth(dp(84));fps.setPadding(dp(8),dp(4),dp(8),dp(4));fps.setBackgroundColor(TouchControlsView.INK);
+        fps.setTextSize(12f*overlayScale);fps.setTypeface(Typeface.MONOSPACE);fps.setGravity(Gravity.CENTER);
+        fps.setMinWidth(overlayPx(84));fps.setPadding(overlayPx(8),overlayPx(4),overlayPx(8),overlayPx(4));fps.setBackgroundColor(TouchControlsView.INK);
         fps.setClickable(false);fps.setFocusable(false);
         FrameLayout.LayoutParams fpsParams=new FrameLayout.LayoutParams(-2,-2,Gravity.TOP|Gravity.CENTER_HORIZONTAL);
-        fpsParams.topMargin=dp(10);viewport.addView(fps,fpsParams);
+        fpsParams.topMargin=overlayPx(10);viewport.addView(fps,fpsParams);
         status=new TextView(this);status.setTextColor(0xffe9d9ba);status.setTextSize(18);
         status.setGravity(Gravity.CENTER);status.setBackgroundColor(0xe60d0d0f);
         status.setPadding(dp(28),dp(18),dp(28),dp(18));status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         status.setText(t("正在准备游戏文件"));root.addView(status,new FrameLayout.LayoutParams(-1,-1));setContentView(root);
         initializeUpdates();
         new Thread(() -> {
-            try { prepareModules();GraphicsDriverSettings.configure(this);ui.post(() -> {prepared=true;configureAndStart();}); }
-            catch(Exception e){ui.post(() -> fail(t("游戏文件准备失败"),e));}
+            try { prepareModules();android.util.Log.i("D2R","prepareModules ok romfsBytes="+romfsBytes);GraphicsDriverSettings.configure(this);android.util.Log.i("D2R","driver settings ok");ui.post(() -> {prepared=true;configureAndStart();}); }
+            catch(Exception e){android.util.Log.e("D2R","game files preparation failed",e);ui.post(() -> fail(t("游戏文件准备失败"),e));}
         },"game-files").start();
     }
     private String t(String text){return strings.text(text);}
@@ -201,6 +237,13 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         for(View view:menuControls){TextView button=(TextView)view;String label=(String)button.getTag();button.setText(t(label));button.setContentDescription(strings.menuDescription(label));}
     }
     private int dp(int value){return Math.round(value*getResources().getDisplayMetrics().density);}
+    /* 覆盖层（方向键 / 确认 / 返回 / 开始 / 模式 / 系统 / FPS）专用的换算：额外乘上图六一节算出的
+     * overlayScale，让窄 dp 的手机上这些按钮与画面保持同一比例。整屏的加载文字仍用 dp()。
+     * Overlay-only conversion (D-pad / confirm / back / start / mode / system / FPS): it multiplies
+     * by the overlayScale computed above so those controls keep the same proportion to the picture
+     * on a narrow-dp phone. Full-screen loading text still uses dp(). */
+    private int overlayPx(int value){return Math.round(value*getResources().getDisplayMetrics().density*overlayScale);}
+    private float overlayScale=1f;
     private void setTouchMode(boolean on){
         touchMode=on; actionButtons=0; if(inputReady)nativeActions(0,0,0,0,0);
         if(touchControls!=null)touchControls.setActive(on);
@@ -376,10 +419,10 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     }
     private void addAction(FrameLayout root,String label,long mask,int gravity,int horizontal,int vertical){
         TextView button=new TextView(this);button.setTag(label);button.setText(t(label));button.setContentDescription(strings.menuDescription(label));button.setTextColor(0xffeadfcd);
-        button.setGravity(Gravity.CENTER);button.setTextSize(17);button.setBackgroundColor(0x70443930);
-        FrameLayout.LayoutParams p=new FrameLayout.LayoutParams(dp(68),dp(58),gravity);
-        if((gravity&Gravity.RIGHT)==Gravity.RIGHT)p.rightMargin=dp(horizontal);else p.leftMargin=dp(horizontal);
-        if((gravity&Gravity.BOTTOM)==Gravity.BOTTOM)p.bottomMargin=dp(vertical);else p.topMargin=dp(vertical);
+        button.setGravity(Gravity.CENTER);button.setTextSize(17f*overlayScale);button.setBackgroundColor(0x70443930);
+        FrameLayout.LayoutParams p=new FrameLayout.LayoutParams(overlayPx(68),overlayPx(58),gravity);
+        if((gravity&Gravity.RIGHT)==Gravity.RIGHT)p.rightMargin=overlayPx(horizontal);else p.leftMargin=overlayPx(horizontal);
+        if((gravity&Gravity.BOTTOM)==Gravity.BOTTOM)p.bottomMargin=overlayPx(vertical);else p.topMargin=overlayPx(vertical);
         button.setOnTouchListener((v,e)->{if(!configured||!surfaceReady||!inputReady)return true;
             int a=e.getActionMasked();if(a==MotionEvent.ACTION_DOWN){nativeTouchActivity();actionButtons|=mask;}
             else if(a==MotionEvent.ACTION_UP||a==MotionEvent.ACTION_CANCEL)actionButtons&=~mask;
@@ -480,8 +523,17 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         try(InputStream in=getAssets().open("overlay-manifest.json")){
             java.io.ByteArrayOutputStream out=new java.io.ByteArrayOutputStream();byte[] b=new byte[4096];int n;
             while((n=in.read(b))!=-1)out.write(b,0,n);json=new String(out.toByteArray(),StandardCharsets.UTF_8);
-        }catch(java.io.FileNotFoundException none){return;}
+        }catch(java.io.FileNotFoundException none){
+            // 以前这里静默返回：APK 没带覆盖层时游戏会退回原版手柄界面，触屏点不了「创建新角色」，
+            // 而日志里只有 native 的 base_unavailable=1，看不出原因。显式记一条。
+            // This used to return silently: without the overlay the game falls back to the stock
+            // gamepad UI where touch cannot press "create new character", and the only trace was the
+            // native base_unavailable=1. Say it out loud.
+            android.util.Log.w("D2ROverlay","APK carries no overlay-manifest.json; the game will use the stock gamepad UI");
+            return;
+        }
         JSONArray list=new JSONObject(json).getJSONArray("files");File base=new File(getFilesDir(),"d2r-mobile");
+        int rewritten=0;
         for(int i=0;i<list.length();i++){
             JSONObject entry=list.getJSONObject(i);String path=entry.getString("path"),hash=entry.getString("sha256");
             if(!path.matches("romfs-overlay(-variants/item_notes)?/(ctrl_touch|touch_strings\\.tsv|dm_textbox_plain\\.tsv|features\\.txt|data/\\.build\\.config|data/00-00000007\\.data)")||
@@ -496,7 +548,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             }
             if(temporary.length()!=bytes||!digest(temporary).equals(hash)){temporary.delete();throw new java.io.IOException(t("覆盖层校验失败"));}
             if(!temporary.renameTo(target))throw new java.io.IOException(t("不能保存覆盖层"));
+            rewritten++;
         }
+        android.util.Log.i("D2ROverlay","files="+list.length()+" rewritten="+rewritten);
     }
     private void configureAndStart(){
         if(!prepared||failed||destroyed)return;

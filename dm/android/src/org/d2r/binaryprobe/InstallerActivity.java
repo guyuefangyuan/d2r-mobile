@@ -20,6 +20,12 @@ public final class InstallerActivity extends Activity {
     private RadioGroup drivers;
     private TextView driverDetail;
     private boolean resumed,openingGame,picking,launchAfterImport;
+    /* driverTouched：用户在本页手动改过图形驱动——此时不自动跳游戏，免得打断他正在做的事。
+     * autoEntered：本次 onCreate 已经自动进过一次，避免渲染回调里反复触发。
+     * driverTouched: the user changed the graphics driver on this page, so do not auto-enter the
+     * game and interrupt them. autoEntered: already auto-entered once in this onCreate, so repeated
+     * render callbacks do not fire again. */
+    private boolean driverTouched,autoEntered;
     private int dp(int n){return Math.round(n*getResources().getDisplayMetrics().density);}
     private TextView text(String value,int size,boolean bold) {
         TextView view=new TextView(this);view.setText(value);view.setTextColor(TouchControlsView.TEXT);view.setTextSize(size);
@@ -73,6 +79,7 @@ public final class InstallerActivity extends Activity {
         drivers.setOnCheckedChangeListener((group,id)->{
             RadioButton selected=group.findViewById(id);if(selected==null)return;
             String mode=(String)selected.getTag();
+            driverTouched=true;   // 用户在本页改驱动：别再自动跳游戏，免得打断 | user changed the driver here: stop auto-entering
             if(GraphicsDriverSettings.save(this,mode))showDriverDetail(mode);
             else {message.setText("驱动选择未能保存，请重试。");String current=GraphicsDriverSettings.read(this);
                 for(int i=0;i<group.getChildCount();i++)if(current.equals(group.getChildAt(i).getTag()))group.check(group.getChildAt(i).getId());}
@@ -115,6 +122,17 @@ public final class InstallerActivity extends Activity {
         help.setText(session.ready?"游戏资源已安装，无需重新导入。更新请覆盖安装；卸载应用会删除游戏数据和存档。":(session.payloadBytes()>0?"首次导入需额外可用空间约 "+size(needed)+"，请保留已下载的资源包直到导入完成。\n":"")+
             "选择 .d2rpack 文件即可，无需解压、移动目录或连接电脑。\n安装完成后可删除下载的资源包；卸载应用会删除游戏数据和存档。");
         if(session.ready&&launchAfterImport)openGame();
+        /* 游戏文件已就位时自动进游戏：桌面图标只指向本页（InstallerActivity 是 LAUNCHER），
+         * 进程被系统回收后重新点图标会回到这里，而大部分用户只想接着玩——原先必须手动再点一次
+         * 「启动游戏」，看起来就像"退到桌面回来就卡在安装页"。driverTouched 记「用户在本页里
+         * 手动改过驱动」，改过就停在页面上，不把他正在做的事打断。
+         * Auto-enter the game once the files are in place: the launcher icon points at this page
+         * (InstallerActivity is the LAUNCHER), so after the system reclaims the process, tapping the
+         * icon lands here — and most users just want to keep playing. It used to require tapping
+         * 「启动游戏」(Start game) again, which read as "coming back from the home screen leaves it
+         * stuck on the install page". driverTouched records that the user changed the driver on this
+         * page; if so, stay put rather than interrupt what they are doing. */
+        if(session.ready&&!launchAfterImport&&!driverTouched&&!autoEntered){autoEntered=true;openGame();}
     }
     @Override public void onStart(){super.onStart();session.attach(observer);}
     @Override public void onResume(){super.onResume();resumed=true;render();}

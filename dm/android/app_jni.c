@@ -518,8 +518,13 @@ static void *game_thread(void *unused) {
     uint64_t expected_image_bytes=content_romfs_bytes;
     pthread_mutex_unlock(&state_lock);
     struct stat st;
-    if (stat(image,&st) || st.st_size < 0 || (uint64_t)st.st_size != expected_image_bytes)
+    /* 诊断：把期望值与实际值都打出来——ROM 不匹配时这两个数字就能直接说明是哪一侧的问题。 */
+    /* Diagnostics: log both the expected and the observed size so a ROM mismatch names its side. */
+    if (stat(image,&st) || st.st_size < 0 || (uint64_t)st.st_size != expected_image_bytes) {
+        LOG("ANDROID_ROMFS_SIZE expected=%llu observed=%lld path=%s",
+            (unsigned long long)expected_image_bytes, (long long)(stat(image,&st)==0?st.st_size:-1), image);
         die("Original RomFS image absent or differs from the verified content manifest");
+    }
     phase_set("正在读取游戏资源");
     int error = romfs_image_setup_checked(image,rom,expected_image_bytes);
     if (error) die("RomFS image setup errno=%d",errno);
@@ -608,11 +613,11 @@ static int copy_jstring(JNIEnv *env,jstring text,char *out,size_t cap) {
 }
 JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNIEnv *env,jclass cls,jstring files,jstring locale,jboolean touch_route) {
     (void)cls;
-    if (atomic_exchange(&configured,1)) return EALREADY;
+    if (atomic_exchange(&configured,1)) { LOG("ANDROID_CONFIGURE rc=EALREADY"); return EALREADY; }
     int rc=copy_jstring(env,files,app_files,sizeof app_files);
     if (!rc) rc=copy_jstring(env,locale,locale_tag,sizeof locale_tag);
-    if (rc || app_files[0]!='/') return rc?rc:EINVAL;
-    if (!touch_route) return ENODEV;
+    if (rc || app_files[0]!='/') { fprintf(stderr,"[dm] ANDROID_CONFIGURE_FAIL path rc=%d first=%c\n",rc,app_files[0]?app_files[0]:'?'); return rc?rc:EINVAL; }
+    if (!touch_route) { fprintf(stderr,"[dm] ANDROID_CONFIGURE_FAIL touch_route\n"); return ENODEV; }
     atomic_store(&input_route_ready,1);
     path(port_root,sizeof port_root,app_files,"d2r-mobile");
     if ((rc=configure_render_scale())) { LOG("ANDROID_3D_SCALE_CONFIG_FAILED errno=%d expected finite 0.50..1.0",rc); return rc; }
@@ -620,6 +625,36 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     unsetenv("DM_ANDROID_PRESENT_60FPS");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/present-60fps");
     if(access(driver_option,F_OK)==0)setenv("DM_ANDROID_PRESENT_60FPS","1",1);
+    /* 诊断开关：强制关掉原生 BC 采样，回到 CPU 解码路径（A/B 用）。
+     * Diagnostic switch: force native BC sampling off and go back to the CPU decode path (for A/B). */
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/no-bc-native");
+    if(access(driver_option,F_OK)==0)setenv("DM_NO_BC_NATIVE","1",1);
+    /* 显式启用原生 BC 采样（默认关闭：Turnip 上画面会错，见 nvn_vk.c 的说明）。
+     * Explicitly enable native BC sampling (off by default: the picture is wrong on Turnip, see the
+     * note in nvn_vk.c). */
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/bc-native");
+    if(access(driver_option,F_OK)==0)setenv("DM_BC_NATIVE","1",1);
+    /* present 模式：diagnostics/present-mode.txt 里写 fifo / mailbox / immediate。
+     * Present mode: write fifo / mailbox / immediate into diagnostics/present-mode.txt. */
+    unsetenv("DM_PRESENT_MODE");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/present-mode.txt");
+    { FILE *pm=fopen(driver_option,"r");
+      if(pm){char v[32];size_t n=fread(v,1,sizeof v-1,pm);v[n]=0;fclose(pm);
+        v[strcspn(v,"\r\n \t")]=0;
+        if(v[0])setenv("DM_PRESENT_MODE",v,1);} }
+    /* 出图间隔模式：diagnostics/present-interval.txt 里写 display（每节拍出一帧）或 game（原版语义）。
+     * 原版游戏把 nvnWindowBuilderSetPresentInterval 设成 2，即每 2 个显示节拍出一帧；在 60 Hz 节拍下
+     * 就等于 30 帧。写 display 会按每个节拍出一帧（上游把这条称为「剪口」：有意偏离原版）。
+     * Present interval mode: write display (one frame per tick) or game (the original semantics) into
+     * diagnostics/present-interval.txt. The original game calls nvnWindowBuilderSetPresentInterval(2),
+     * i.e. one frame every two display ticks, which on a 60 Hz cadence is exactly 30 fps. Writing
+     * display presents one frame per tick (upstream calls this a cut: an intentional deviation). */
+    unsetenv("DM_PRESENT_INTERVAL");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/present-interval.txt");
+    { FILE *pi=fopen(driver_option,"r");
+      if(pi){char v[32];size_t n=fread(v,1,sizeof v-1,pi);v[n]=0;fclose(pi);
+        v[strcspn(v,"\r\n \t")]=0;
+        if(v[0])setenv("DM_PRESENT_INTERVAL",v,1);} }
     path(driver_option,sizeof driver_option,port_root,"diagnostics/private-vulkan");
     if(access(driver_option,F_OK)==0)setenv("DM_PRIVATE_VULKAN","turnip",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/private-vulkan-sysmem");
@@ -785,6 +820,9 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_SAMPLE_COPY_CACHE","1",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/skip-ps.txt");
     {FILE *sf=fopen(driver_option,"r");if(sf){char sk[17]={0};size_t n=fread(sk,1,16,sf);fclose(sf);if(n==16)setenv("DM_SKIP_PS",sk,1);}}
+    /* 跳过指定计算着色器的派发（绕开驱动编译缺陷；文件内容 = 16 位键） */
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/skip-cs.txt");
+    {FILE *sf=fopen(driver_option,"r");if(sf){char sk[17]={0};size_t n=fread(sk,1,16,sf);fclose(sf);if(n==16)setenv("DM_SKIP_CS",sk,1);}}
     unsetenv("DM_EVENT_TRACE");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/event-trace");
     if(access(driver_option,F_OK)==0)setenv("DM_EVENT_TRACE","1",1);
@@ -805,6 +843,69 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     unsetenv("DM_RENDER_SLOTS");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/render-slots.txt");
     {FILE *rf=fopen(driver_option,"r");if(rf){char rv[8]={0};size_t rn=fread(rv,1,7,rf);fclose(rf);if(rn)setenv("DM_RENDER_SLOTS",rv,1);}}
+    /* 渲染槽位复用的页粒度：diagnostics/slot-page-shift.txt 写 6..12。
+     * 越细位图越大、跨槽冲突越少（冲突时 CPU 要等整个槽的 GPU fence，是当前第一瓶颈）。
+     * 6 = 64 B（位图 ×4）、8 = 256 B（缺省）、10 = 1 KiB、12 = 4 KiB。
+     * Page granularity of the render-slot reuse bitmap: write 6..12 into
+     * diagnostics/slot-page-shift.txt. Finer means a bigger bitmap and fewer cross-slot conflicts
+     * (a conflict makes the CPU wait for that whole slot's GPU fence — the current top bottleneck).
+     * 6 = 64 B (bitmap ×4), 8 = 256 B (default), 10 = 1 KiB, 12 = 4 KiB. */
+    unsetenv("DM_SLOT_PAGE_SHIFT");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/slot-page-shift.txt");
+    {FILE *sf=fopen(driver_option,"r");if(sf){char sv[8]={0};size_t sn=fread(sv,1,7,sf);fclose(sf);if(sn)setenv("DM_SLOT_PAGE_SHIFT",sv,1);}}
+    /* 出图帧率上限：diagnostics/present-hz.txt 写一个整数（如 60 / 40 / 30）。
+     * 这是省电的主要手段——帧率降下来，CPU 与 GPU 的忙碌时间同比减少，机身温度和功耗都降。
+     * 120 Hz 竖屏上节拍器只取整数分之一（60 / 40 / 30），40 与 45 会落到同一档。
+     * Present frame-rate cap: write an integer (60 / 40 / 30) into diagnostics/present-hz.txt.
+     * This is the main power lever — a lower cap cuts CPU and GPU busy time proportionally, which
+     * lowers both temperature and draw. On a 120 Hz panel the pacer only takes integer fractions
+     * (60 / 40 / 30), so 40 and 45 land on the same tier. */
+    unsetenv("DM_PRESENT_HZ");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/present-hz.txt");
+    {FILE *hf=fopen(driver_option,"r");if(hf){char hv[8]={0};size_t hn=fread(hv,1,7,hf);fclose(hf);if(hn)setenv("DM_PRESENT_HZ",hv,1);}}
+    /* 触摸诊断：diagnostics/touch-trace 存在就记录每次按下落在哪个触屏控件上、
+     * 有没有转发给游戏 UI。菜单类界面点不动时，用它区分「被控件吃掉」和「事件没到」。
+     * Touch diagnostics: when diagnostics/touch-trace exists, record which touch control each
+     * press lands on and whether it was forwarded to the game UI. When a menu cannot be tapped
+     * this distinguishes "eaten by a control" from "the event never arrived". */
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/touch-trace");
+    if(access(driver_option,F_OK)==0)setenv("DM_TOUCH_TRACE","1",1);
+    /* 点击诊断：diagnostics/click-trace 存在就记录每一次真正发出的界面点击及其坐标，
+     * 用来区分「点击没发出去」与「发出去了但游戏没响应」。
+     * Click diagnostics: when diagnostics/click-trace exists, log every UI click actually sent and
+     * its coordinates, to tell "never sent" apart from "sent but ignored". */
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/click-trace");
+    if(access(driver_option,F_OK)==0)setenv("DM_CLICK_TRACE","1",1);
+    /* 细分性能剖析：diagnostics/profile-detail 存在就打开逐项计时（lookup / pool / bind /
+     * renderpass / desc_alloc / desc_update / prep）。不开时这些值恒为 0，看不出热点在哪。
+     * Fine-grained profiling: diagnostics/profile-detail turns on per-phase timing (lookup / pool /
+     * bind / renderpass / desc_alloc / desc_update / prep). Without it those values stay 0 and the
+     * hot spot is invisible. */
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/profile-detail");
+    if(access(driver_option,F_OK)==0)setenv("DM_PROFILE_DETAIL","1",1);
+    /* pool 诊断开关：pool-range-stats 报告每档大小的读次数；no-dirty-uploads 关掉脏页增量上传，
+     * 用来 A/B 判断 pool_ms 是不是脏页追踪造成的。
+     * Pool diagnostics: pool-range-stats reports read counts per size bucket; no-dirty-uploads
+     * disables incremental dirty-page upload, for A/B testing whether pool_ms comes from dirty
+     * tracking. */
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/pool-range-stats");
+    if(access(driver_option,F_OK)==0)setenv("DM_POOL_RANGE_STATS","1",1);
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/no-dirty-uploads");
+    if(access(driver_option,F_OK)==0)setenv("DM_DISABLE_DIRTY_UPLOADS","1",1);
+    /* UI 树探查：diagnostics/ui-dump.txt 里写「面板名」或「动作:面板名」，配合 ui-dump-at.txt 的
+     * 触发消息；命中后第 45 帧把该控件的可见子树打出来（名字、可见、虚表、子控件数）。
+     * 用来摸清某个面板（如传送点）的控件结构，好给它写触摸点选。
+     * UI tree probing: put a panel name, or action:panel, in diagnostics/ui-dump.txt together with a
+     * trigger message in ui-dump-at.txt; on frame 45 after the hit the widget's visible subtree is
+     * dumped (name, visibility, vtable, child count). Used to learn a panel's widget structure (for
+     * example the waypoint page) so touch selection can be written for it. */
+    unsetenv("DM_UI_DUMP");unsetenv("DM_UI_TAPS_AT");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/ui-dump.txt");
+    {FILE *uf=fopen(driver_option,"r");if(uf){char uv[64]={0};size_t un=fread(uv,1,63,uf);fclose(uf);if(un)uv[un]=0;
+      uv[strcspn(uv,"\r\n")]=0;if(uv[0])setenv("DM_UI_DUMP",uv,1);}}
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/ui-dump-at.txt");
+    {FILE *af=fopen(driver_option,"r");if(af){char av[64]={0};size_t an=fread(av,1,63,af);fclose(af);if(an)av[an]=0;
+      av[strcspn(av,"\r\n")]=0;if(av[0])setenv("DM_UI_TAPS_AT",av,1);}}
     unsetenv("DM_ADAPTED_SHADER_DIR");unsetenv("DM_DIAG_LOD_BIAS");unsetenv("DM_SHADER_OVERRIDE_DIR");
     path(driver_option,sizeof driver_option,port_root,"diagnostics/shader-override");
     if(access(driver_option,F_OK)==0)setenv("DM_SHADER_OVERRIDE_DIR",driver_option,1);
@@ -824,6 +925,17 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeConfigure(JNI
     if(access(driver_option,F_OK)==0)setenv("DM_DIAG_BARRIER","2",1);
     path(driver_option,sizeof driver_option,port_root,"diagnostics/barrier-stats");
     if(access(driver_option,F_OK)==0)setenv("DM_BARRIER_STATS","1",1);
+    /* 渲染槽位数：diagnostics/render-slots.txt 写 1..4。槽位多了可以让 CPU 提交与 GPU 执行重叠，
+     * 但每个槽有独立资源缓存，开太大会涨显存。默认 1（上游缺省）。
+     * Render slot count: write 1..4 into diagnostics/render-slots.txt. More slots let CPU submission
+     * overlap GPU execution, but each slot owns a resource cache, so too many costs memory.
+     * Defaults to 1 (the upstream default). */
+    unsetenv("DM_RENDER_SLOTS");
+    path(driver_option,sizeof driver_option,port_root,"diagnostics/render-slots.txt");
+    { FILE *rs=fopen(driver_option,"r");
+      if(rs){char v[16];size_t n=fread(v,1,sizeof v-1,rs);v[n]=0;fclose(rs);
+        v[strcspn(v,"\r\n \t")]=0;
+        if(v[0])setenv("DM_RENDER_SLOTS",v,1);} }
     char logs[PATH_MAX], log[PATH_MAX], shaders[PATH_MAX];
     path(logs,sizeof logs,port_root,"diagnostics");
     setenv("DM_FRAME_DIR",logs,1);
@@ -926,6 +1038,15 @@ JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeTouch(JNIEnv 
 JNIEXPORT jint JNICALL Java_org_d2r_binaryprobe_GameActivity_nativeStart(JNIEnv *env,jclass cls) {
     (void)env;(void)cls;
     if (!atomic_load(&configured)) return ENODEV;
+    /* 没有内容清单里的镜像尺寸就不启动客体：原生层没有默认镜像，只有在 nativeContentProfile
+     * 交来已验证尺寸后才允许拉起游戏线程，否则 game_thread 会拿 0 去比对真实文件而必然失败。
+     * Never start the guest without an image size from the content manifest: the native layer has no
+     * default image, so the game thread may only start once nativeContentProfile has supplied the
+     * verified size; otherwise it compares 0 against the real file and always fails. */
+    { pthread_mutex_lock(&state_lock);
+      uint64_t ready_bytes = content_romfs_bytes;
+      pthread_mutex_unlock(&state_lock);
+      if (!ready_bytes) { LOG("ANDROID_START_DEFERRED content profile not supplied yet"); return EAGAIN; } }
     pthread_mutex_lock(&focus_lock);
     pthread_mutex_lock(&state_lock);
     if (shutdown_requested || activity_focus!=1 || atomic_load(&lifecycle_focus)!=1 || !native_window) {

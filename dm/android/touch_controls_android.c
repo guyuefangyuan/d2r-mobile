@@ -363,6 +363,19 @@ int dm_android_touch_event(const int32_t *id,const float *x,const float *y,int n
             slots[slot].active=1;slots[slot].id=id[i];control_begin(slot,px,py,now);
         }else {dm_tc_move_at(&controls,slot,px,py,now);flow_event(slot,DM_ATF_MOVE,now);}
         if(controls.finger[slot].target==DM_TC_NONE)raw[nr++]=(dm_android_pointer){.id=(uint32_t)id[i],.x=x[i],.y=y[i]};
+        /* 诊断：手指是否被触屏控件消费。菜单类界面点不动时，这行能区分「被控件吃掉」
+         * 与「事件根本没到」两种完全不同的原因。DM_TOUCH_TRACE=1 打开。
+         * Diagnostics: whether a finger was consumed by a touch control. When a menu cannot be
+         * tapped this distinguishes "eaten by a control" from "the event never arrived".
+         * Enable with DM_TOUCH_TRACE=1. */
+        if(getenv("DM_TOUCH_TRACE")){
+            static int logged;
+            if(logged<64){logged++;
+                fprintf(stderr,"[touch] slot=%d target=%d fwd=%d x=%.3f y=%.3f nav=%d\n",
+                        slot,controls.finger[slot].target,
+                        controls.finger[slot].target==DM_TC_NONE,(double)x[i],(double)y[i],
+                        game_state.navigation);}
+        }
     }
     /* A committed layout change can cancel all contacts during tick. Do not
      * republish the raw contacts collected before that cancellation. */

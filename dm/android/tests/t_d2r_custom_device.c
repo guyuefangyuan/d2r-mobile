@@ -75,9 +75,9 @@ int main(int argc,char **argv) {
     put64(root,0x58,(uintptr_t)top);put64(root,0x60,2);put64(panel,0x58,(uintptr_t)panel_children);put64(panel,0x60,1);
     put64(scroll,0x58,(uintptr_t)scroll_children);put64(scroll,0x60,1);put64(view,0x58,(uintptr_t)view_children);put64(view,0x60,1);
     put64(mods[0].base,0x2f05458,(uintptr_t)root);put64(mods[0].base,0x20c0000+7*8,base+0xae5f28);
-    const char *keys[]={"lang_en","auto_mana","merc_pot","drop_light","map_mark","item_notes","icloud","pot_pick","drop_haptic","gem_pick","store_btn","eco_fps","q3d","loot_filter","auto_buff","touch_swap_above"};
-    char names[32][64];uint8_t *box[16],*labels[16];int32_t row_y[16];unsigned count=0,visual=0;
-    for(int i=0;i<16;i++) {
+    const char *keys[]={"lang_en","auto_mana","merc_pot","drop_light","map_mark","item_notes","icloud","pot_pick","drop_haptic","gem_pick","store_btn","eco_fps","q3d","loot_filter","auto_buff","touch_swap_above","fps40"};
+    char names[34][64];uint8_t *box[17],*labels[17];int32_t row_y[17];unsigned count=0,visual=0;
+    for(int i=0;i<17;i++) {
         row_y[i]=visual*180;
         snprintf(names[i*2],64,"TouchCustom_%s",keys[i]);snprintf(names[i*2+1],64,"TouchCustom_%s_Text",keys[i]);
         box[i]=widget(names[i*2],DM_VT_TOGGLE,rows,1315,row_y[i]+30,70,70);box[i][0xa88]=127;

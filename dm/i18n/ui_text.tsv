@@ -75,6 +75,7 @@ dmCustomDropHaptic	高价值物品掉落时震动	Vibrate on valuable drops	自�
 dmCustomGemPick	符文与宝石自动拾取（直接进高级仓库）	Auto-stash runes & gems	自定义页开关
 dmCustomStoreBtn	背包「存放」按钮	Inventory Deposit button	自定义页开关
 dmCustomEcoFps	省电模式（30 帧）	Power saver (30 fps)	自定义页开关
+dmCustomFps40	40 帧（省电与流畅平衡）	40 fps (balanced)	自定义页开关；与上一行合起来是三档：两个都勾 = 30 帧、只勾这个 = 40 帧、都不勾 = 60 帧
 dmCustomQ3dSmooth	流畅优先	Smoothness first	自定义页「3D 画质」单选的第一项（缺省；dm_custom.c 键 q3d=0）
 dmCustomQ3dSmoothHint	掉帧时自动降低 3D 画面清晰度	Lowers 3D resolution when frames drop	流畅优先下面的说明小字
 dmCustomQ3dQuality	画质优先	Quality first	自定义页「3D 画质」单选的第二项（q3d=1）

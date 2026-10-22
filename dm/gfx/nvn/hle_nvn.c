@@ -1438,6 +1438,13 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     // 垂直同步阻塞在这里（真机 NVN：交换链里的贴图都在等显示时，等下一张被释放），不在出图里——游戏常持锁调出图
     // Vsync blocks here (real-device NVN: when all textures in the swapchain are waiting for display, wait for the next one to be released), not in present -- the game often calls present while holding a lock
     uint64_t at = *idx < 4 ? o->avail[*idx] : 0, now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0;
+    /* 诊断：把出图周期与实际等待打出来，判断 30 帧是被这里按 vsync 节流，还是渲染本身慢。
+     * Diagnostics: print the present period and the actual wait, to tell whether 30 fps is throttled
+     * here by vsync or the rendering is genuinely slow. */
+    { static int shown; if (shown < 8) { shown++;
+        LOG("[nvn] ACQUIRE_PACE idx=%d interval=%d period_us=%llu wait_us=%llu g_hz=%d auto=%d",
+            *idx, o->interval, (unsigned long long)(present_period(o) / 1000),
+            (unsigned long long)(wait / 1000), g_hz, g_hz_auto); } }
     if (!dm_detclock_enabled()) {   // 取图线程登记为时间约束线程（不再只在「来早了」时才登记：热态一直落后时也要声明） | Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
         static uint64_t rt_period; uint64_t period = present_period(o);
         if (period && rt_period != period) { rt_period = period; set_time_constraint(&g_rt_main, period); }
@@ -1682,6 +1689,16 @@ static void present_cfg(const win_t *o) {
 static uint64_t present_period(const win_t *o) {
     present_cfg(o);
     int itv = g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; double hz = g_hz_auto ? dm_pace_hz(mtl_display_refresh(), 60) : g_hz;   // 省电模式的 30 帧由显示节拍决定，这里照旧按 60 档（60 / 120 Hz 屏与原先逐字相同） | Power saving 30 fps is determined by display pacing; here the 60 tier is used as before (identical to before on 60 / 120 Hz screens)
+    /* Android 的 Vulkan 后端原先从不读「省电模式」(dm_custom 的 eco_fps)，设置里那个帧率档在
+     * Android 上不起作用（iOS 由 nvn_mtl.m 的 mtl_fps_target 每帧读）。这里补上：dm_fps_setting()
+     * 现在返回目标帧率本身（60 / 40 / 30），低于它就把节拍压到那一档，不低于就保持原样。
+     * The Android Vulkan backend never read the power-saving setting (dm_custom's eco_fps), so the
+     * frame-rate option had no effect on Android (on iOS nvn_mtl.m's mtl_fps_target reads it every
+     * frame). Wire it in here: dm_fps_setting() now returns the target rate itself (60 / 40 / 30);
+     * when that is below the current cadence, pin to it, otherwise leave the cadence alone. */
+    { int dm_fps_setting(void);
+      int target = dm_fps_setting();
+      if (target > 0 && hz > (double)target) hz = (double)target; }
     return hz > 0 ? (uint64_t)(itv * 1e9 / hz) : 0;
 }
 int (*g_nvn_loadscreen_up)(void);   // 宿主登记：读取画面此刻是否开着（diag.c 订阅界面消息时填；图形单测里为空 = 不设闸） | host registration: whether the loading screen is up right now (filled in when diag.c subscribes to UI messages; null in graphics unit tests = no gate)

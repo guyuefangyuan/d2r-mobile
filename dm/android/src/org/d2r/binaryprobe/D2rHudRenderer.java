@@ -51,7 +51,12 @@ final class D2rHudRenderer {
         if(images.containsKey(name))return images.get(name);
         Bitmap result=null;
         try(InputStream input=assets.open(name)) {BitmapFactory.Options options=new BitmapFactory.Options();options.inScaled=false;result=BitmapFactory.decodeStream(input,null,options);}
-        catch(Exception ignored) {}
+        catch(Exception error) {Log.i("D2rHUD","image_failed "+name+" "+error.getClass().getSimpleName()+": "+error.getMessage());}
+        /* 空结果也记一笔：缺文件和解码失败（OOM / 数据坏）是两回事，不分开就看不出图集为什么没加载。
+         * Also log an empty result: a missing file and a decode failure (OOM, bad data) are different
+         * problems, and without separating them there is no telling why an atlas did not load. */
+        if(result==null)Log.i("D2rHUD","image_null "+name);
+        else Log.i("D2rHUD","image_ok "+name+" "+result.getWidth()+"x"+result.getHeight());
         images.put(name,result);return result;
     }
     private Bitmap atlas(int index) {
@@ -64,7 +69,7 @@ final class D2rHudRenderer {
             int width=index==8?2720:4080;
             if(candidate!=null&&candidate.getWidth()==width&&candidate.getHeight()==65) {
                 atlases[index]=candidate;Log.i("D2rHUD","atlas_loaded index="+index+" size="+width+"x65");
-            } else Log.i("D2rHUD","atlas_unavailable index="+index);
+            } else Log.i("D2rHUD","atlas_unavailable index="+index+" got="+(candidate==null?"null":candidate.getWidth()+"x"+candidate.getHeight())+" want="+width+"x65");
         }
         return atlases[index];
     }

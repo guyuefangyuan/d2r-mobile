@@ -17,8 +17,12 @@ int dm_vk_memory_get_stats(DmVkMemoryStats *out) {
     pthread_mutex_unlock(&G.lock);return 0;
 }
 int dm_vk_memory_trim_caches(unsigned flags,DmVkMemoryStats *out) {
-    if(flags&~DM_VK_TRIM_ALL)return EINVAL;
-    if(pthread_mutex_trylock(&G.lock))return EBUSY;
+    /* 允许的位 = ALL（1|2|4）加上 POOLS（8）。POOLS 不并进 ALL：默认的 ALL 语义要保持不变
+     * （只丢可重建的派生资源），池镜像要显式点名才丢。
+     * Allowed bits = ALL (1|2|4) plus POOLS (8). POOLS is not folded into ALL so the default ALL
+     * semantics stay as they were (only reconstructable derived resources); the pool mirror is
+     * dropped only when explicitly requested. */
+    if(flags&~(unsigned)(DM_VK_TRIM_ALL|DM_VK_TRIM_POOLS))return EINVAL;    if(pthread_mutex_trylock(&G.lock))return EBUSY;
     VkSubmission *contexts[2]={&G.submission_slot,&G.submission_slot2};
     if(G.active||g_jcount||ghost.n||ghost.busy){pthread_mutex_unlock(&G.lock);return EBUSY;}
     for(unsigned k=0;k<2;k++)if(contexts[k]->phase!=SUBMISSION_UNUSED&&contexts[k]->phase!=SUBMISSION_RETIRED){
@@ -33,6 +37,25 @@ int dm_vk_memory_trim_caches(unsigned flags,DmVkMemoryStats *out) {
     if(flags&DM_VK_TRIM_WRITEBACK)for(unsigned k=0;k<2;k++){
         if(contexts[k]->wb_stage.m)freed+=contexts[k]->wb_stage.allocation_size;
         buffer_free(&contexts[k]->wb_stage);contexts[k]->wb_staged=0;contexts[k]->wb_stage_total=0;
+    }
+    if(flags&DM_VK_TRIM_POOLS){
+        /* 释放池镜像本身（guest 内存的 Vulkan 副本）。保留 VPool 的注册信息（guest 指针、大小、
+         * serial、槽位位图）——只丢 v，下一次 pool_read 由 pool_materialize 按需重建。
+         * 必须同时清掉增量上传缓存：那些条目记的是「镜像里已有这段」的戳，镜像没了就全不算数，
+         * 否则回来时会把旧戳当真、跳过本该做的上传。
+         * Release the pool mirror itself (the Vulkan copy of guest memory). The VPool registration
+         * (guest pointer, size, serial, slot bitmaps) is kept — only v is dropped, and the next
+         * pool_read rebuilds it through pool_materialize. The incremental upload cache must be
+         * cleared at the same time: its entries record "the mirror already holds this range", which
+         * is meaningless once the mirror is gone, and keeping them would let stale stamps skip
+         * uploads that are actually needed. */
+        for(int i=0;i<G.npool;i++){
+            if(!G.pools[i].v.b)continue;   /* buffer_free 会把整个 VBuffer 清零，所以 v.b 就是「物化过」的判据 | buffer_free zeroes the whole VBuffer, so v.b is the "was materialised" test */
+            freed+=G.pools[i].v.allocation_size;
+            buffer_free(&G.pools[i].v);
+        }
+        memset(G.pool_uploads,0,sizeof G.pool_uploads);
+        G.pool_revision++;
     }
     if(flags){
         /* Primary image identities and guest registrations survive. Cached

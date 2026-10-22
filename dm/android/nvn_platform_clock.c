@@ -67,7 +67,23 @@ static struct {
     void (*close)(HintSession *);
     uint64_t frames,valid,skipped,wall_ns,cpu_ns,waits[DM_NVN_WAIT_KIND_COUNT],success,errors;
 } hint={.lock=PTHREAD_MUTEX_INITIALIZER,.generation=1,.foreground=1};
-static const int64_t hint_target_ns=33333333;
+/* ADPF 的目标时长 = 每帧的工作预算。原来是 33333333（30 fps），等于向系统声明「我这一帧
+ * 有 33 ms 可以用」——系统据此定频，自然就只跑到 30 帧。改成 16666667（60 fps）后，
+ * 系统知道 deadline 是 16.7 ms，会拉高频率/给大核。DM_PRESENT_HZ 若显式设了别的值，
+ * 目标跟着它走（atof 取倒数），避免声明与出图节奏不一致。
+ * ADPF's target duration is the per-frame work budget. It used to be 33333333 (30 fps), which
+ * declared "this frame may take 33 ms" — the system sets frequency from that and settles at 30 fps.
+ * At 16666667 (60 fps) the system knows the deadline is 16.7 ms and raises clocks / prefers big
+ * cores. If DM_PRESENT_HZ is set explicitly the target follows it, so the declaration never
+ * disagrees with the present cadence. */
+static int64_t hint_target_duration_ns(void) {
+    const char *hz = getenv("DM_PRESENT_HZ");
+    if (hz && *hz) {
+        double v = atof(hz);
+        if (v >= 24.0 && v <= 480.0) return (int64_t)(1e9 / v);
+    }
+    return 16666667;   /* 60 fps */
+}
 
 static void hint_close_locked(void) {
     if(hint.session){hint.close(hint.session);hint.session=NULL;}
@@ -81,9 +97,21 @@ static void hint_owner_exited(void *pointer) {
 }
 static void hint_initialize_locked(void) {
     if(hint.initialized)return;hint.initialized=1;
-    const char *setting=getenv("DM_PERFORMANCE_HINTS");hint.enabled=setting&&!strcmp(setting,"1");
+    /* ADPF 默认开启：这是 Android 上唯一能告诉系统「我每帧有多少活要赶」的机制，
+     * 对应 iOS 的 THREAD_TIME_CONSTRAINT_POLICY（见 WHY-IOS-60FPS.md）。
+     * 原先只在 DM_PERFORMANCE_HINTS=1 时才启用，结果是 enabled=0、一次也没上报过，
+     * 系统不知道这条翻译线程在赶 deadline，于是按普通调度跑，掉到 33 ms/帧。
+     * DM_PERFORMANCE_HINTS=0 可显式关掉。
+     * ADPF is on by default: it is the only Android mechanism that tells the system how much work
+     * each frame must finish, the counterpart of iOS's THREAD_TIME_CONSTRAINT_POLICY (see
+     * WHY-IOS-60FPS.md). It used to require DM_PERFORMANCE_HINTS=1, which left enabled=0 and never
+     * reported anything, so the system did not know this translation thread was chasing a deadline,
+     * scheduled it like ordinary work, and the frame time fell to 33 ms. Set
+     * DM_PERFORMANCE_HINTS=0 to turn it off explicitly. */
+    const char *setting=getenv("DM_PERFORMANCE_HINTS");
+    hint.enabled=!(setting&&!strcmp(setting,"0"));
     hint.api=android_get_device_api_level();
-    const char *reason="opt_in_off";
+    const char *reason=hint.enabled?"startup":"opt_out";
     if(hint.enabled){
         reason="api_below_33";
         if(hint.api>=33){
@@ -101,7 +129,7 @@ static void hint_initialize_locked(void) {
     hint.key_ready=pthread_key_create(&hint.owner_key,hint_owner_exited)==0;
     if(!hint.key_ready)reason="owner_cleanup_unavailable";
     fprintf(stderr,"[nvn-android] ADPF_INIT enabled=%d api=%d backend=native33 target_ns=%lld manager_available=%d reason=%s\n",
-            hint.enabled,hint.api,(long long)hint_target_ns,hint.manager!=NULL,reason);
+            hint.enabled,hint.api,(long long)hint_target_duration_ns(),hint.manager!=NULL,reason);
 }
 static int hint_same_owner_locked(void) {
     return hint.owner&&pthread_equal(hint.owner->thread,pthread_self())&&hint.owner->tid==gettid();
@@ -135,10 +163,10 @@ void dm_android_nvn_work_begin(void) {
         if(owner){*owner=(HintOwner){pthread_self(),gettid()};
             if(pthread_setspecific(hint.owner_key,owner))free(owner);else hint.owner=owner;}
         if(hint.owner&&hint.enabled&&hint.manager&&!hint.failed){
-            int32_t tid=hint.owner->tid;hint.session=hint.create_session(hint.manager,&tid,1,hint_target_ns);
+            int32_t tid=hint.owner->tid;hint.session=hint.create_session(hint.manager,&tid,1,hint_target_duration_ns());
             if(!hint.session)hint.failed=1;
             fprintf(stderr,"[nvn-android] ADPF_SESSION tid=%d available=%d target_ns=%lld\n",
-                    (int)tid,hint.session!=NULL,(long long)hint_target_ns);
+                    (int)tid,hint.session!=NULL,(long long)hint_target_duration_ns());
         }
     }
     memset(&work_frame,0,sizeof work_frame);
@@ -179,7 +207,7 @@ void dm_android_nvn_work_end(uint64_t frame) {
     if(hint.frames>=60){
         fprintf(stderr,"[nvn-android] ADPF_WORK_PROFILE frame=%llu frames=%llu valid_frames=%llu skipped_frames=%llu enabled=%d available=%d tid=%d target_ns=%lld cpu_work_wall_ms=%.3f thread_cpu_ms=%.3f excluded_fence_ms=%.3f excluded_queue_idle_ms=%.3f excluded_acquire_ms=%.3f excluded_present_ms=%.3f excluded_event_ms=%.3f excluded_translation_idle_ms=%.3f report_success=%llu report_failed=%llu\n",
             (unsigned long long)frame,(unsigned long long)hint.frames,(unsigned long long)hint.valid,(unsigned long long)hint.skipped,
-            hint.enabled,hint.session!=NULL,hint.owner?(int)hint.owner->tid:-1,(long long)hint_target_ns,hint.wall_ns/1e6,hint.cpu_ns/1e6,
+            hint.enabled,hint.session!=NULL,hint.owner?(int)hint.owner->tid:-1,(long long)hint_target_duration_ns(),hint.wall_ns/1e6,hint.cpu_ns/1e6,
             hint.waits[DM_NVN_WAIT_FENCE]/1e6,hint.waits[DM_NVN_WAIT_QUEUE_IDLE]/1e6,hint.waits[DM_NVN_WAIT_ACQUIRE]/1e6,
             hint.waits[DM_NVN_WAIT_PRESENT]/1e6,hint.waits[DM_NVN_WAIT_EVENT]/1e6,hint.waits[DM_NVN_WAIT_TRANSLATION_QUEUE]/1e6,(unsigned long long)hint.success,(unsigned long long)hint.errors);
         hint.frames=hint.valid=hint.skipped=hint.wall_ns=hint.cpu_ns=hint.success=hint.errors=0;

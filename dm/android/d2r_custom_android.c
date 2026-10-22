@@ -9,6 +9,7 @@
 #include <sys/uio.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <errno.h>
 
 enum { NODE_MAX=2048, ROOT_OFF=0x2f05458, NINE_TILE_VT=0x20bc048 };
 typedef struct {
@@ -37,11 +38,20 @@ const char *dm_android_custom_startup_locale(void) {
      * here: this executes before loading modules or initializing the SDK. */
     int en=dm_custom_lang_explicit();return en<0?NULL:en?"en":"zh-Hans";
 }
+/* 缺文件时把「缺哪个、为什么」写进日志，而不是只回一个 base_unavailable=1：
+ * 之前手机上就是只看到 base_unavailable=1，无法区分「APK 没带覆盖层」和「拷贝失败」。
+ * When a file is missing, log which one and why instead of only returning
+ * base_unavailable=1: on the phone that single line could not distinguish "the APK ships no
+ * overlay" from "the copy failed". */
 static int overlay_complete(const char *root) {
     static const char *files[]={"ctrl_touch","touch_strings.tsv","data/.build.config","data/00-00000007.data"};
     for(unsigned i=0;i<sizeof files/sizeof *files;i++) {
-        char path[1200];struct stat st;
-        if(snprintf(path,sizeof path,"%s/%s",root,files[i])>=(int)sizeof path || stat(path,&st) || !S_ISREG(st.st_mode) || st.st_size<=0 || access(path,R_OK))return 0;
+        char path[1200];struct stat st;errno=0;
+        if(snprintf(path,sizeof path,"%s/%s",root,files[i])>=(int)sizeof path){LOG("ANDROID_CUSTOM_OVERLAY missing=%s reason=path_too_long",files[i]);return 0;}
+        if(stat(path,&st)){LOG("ANDROID_CUSTOM_OVERLAY missing=%s reason=stat errno=%d",files[i],errno);return 0;}
+        if(!S_ISREG(st.st_mode)){LOG("ANDROID_CUSTOM_OVERLAY missing=%s reason=not_regular",files[i]);return 0;}
+        if(st.st_size<=0){LOG("ANDROID_CUSTOM_OVERLAY missing=%s reason=empty",files[i]);return 0;}
+        if(access(path,R_OK)){LOG("ANDROID_CUSTOM_OVERLAY missing=%s reason=unreadable errno=%d",files[i],errno);return 0;}
     }
     return 1;
 }

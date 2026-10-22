@@ -35,20 +35,30 @@ int main(void) {
     assert(nvn_pace(&pace,now,period)==0&&pace.target==now);
     assert(nvn_pace(&pace,now+1000000,period)==period-1000000);
     /* Real cadence changes: the cap follows applied settings, preserves a
-     * 20 FPS guest, and lets the existing pacer recover after a toggle. */
+     * 20 FPS guest, and lets the existing pacer recover after a toggle.
+     * 参数从「是否省电」的布尔值改成了目标帧率本身（60 / 40 / 30），0 表示不限。
+     * The parameter is now the target frame rate itself (60 / 40 / 30) instead of a boolean
+     * "is power saving on"; 0 means uncapped. */
     for(int hz=0;hz<=240;hz++)for(int interval=0;interval<=8;interval++) {
         uint64_t guest=dm_android_present_period_ns(hz,1,interval,0);
-        uint64_t eco=dm_android_present_power_period_ns(guest,1);
+        uint64_t eco=dm_android_present_power_period_ns(guest,30);
         assert(dm_android_present_power_period_ns(guest,0)==guest);
         assert(!guest ? !eco : eco>=guest && eco>=1000000000ULL/30);
         checks+=2;
     }
-    assert(dm_android_present_power_period_ns(50000000,1)==50000000);
+    /* 三档都要只封顶不加速：40 帧档的目标周期 25 ms，60 帧档不改变原周期。 */
+    assert(dm_android_present_power_period_ns(50000000,30)==50000000);
+    assert(dm_android_present_power_period_ns(1000000000ULL/60,30)==1000000000ULL/30);
+    assert(dm_android_present_power_period_ns(1000000000ULL/60,40)==1000000000ULL/40);
+    assert(dm_android_present_power_period_ns(1000000000ULL/60,60)==1000000000ULL/60);
+    assert(dm_android_present_power_period_ns(1000000000ULL/60,0)==1000000000ULL/60);
+    assert(dm_android_present_power_period_ns(1000000000ULL/30,60)==1000000000ULL/30);   /* 已经更慢的不被拉快 */
+    checks+=6;
     pace=(nvn_pacer){0};now=1000000000ULL;
     assert(!nvn_pace(&pace,now,1000000000ULL/60));
     for(unsigned frame=0;frame<90;frame++) {
-        int eco=frame>=30 && frame<60;
-        uint64_t step=dm_android_present_power_period_ns(1000000000ULL/60,eco);
+        int target=frame>=30 && frame<60 ? 30 : 60;
+        uint64_t step=dm_android_present_power_period_ns(1000000000ULL/60,target);
         uint64_t start=now;
         now+=1000000;now+=nvn_pace(&pace,now,step);
         assert(now-start==step);checks++;

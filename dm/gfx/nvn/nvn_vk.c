@@ -248,6 +248,13 @@ static struct {
     uint64_t profile_cmd_issued[NVN_VK_CMD_STATE_COUNT],profile_cmd_skipped[NVN_VK_CMD_STATE_COUNT];
     NvnDirtyQueryStats profile_dirty_base;
     uint64_t profile_plan_hits,profile_plan_misses,profile_plan_fallbacks,profile_plan_buffers,profile_plan_images,profile_driver_revision_hits;
+    /* 绑定计划 miss 的成因分类：不分开就无法判断哪一项值得优化。
+     * Breakdown of binding-plan misses; without it there is no telling which one is worth fixing. */
+    uint64_t profile_plan_miss_epoch,profile_plan_miss_buf,profile_plan_miss_img,
+             profile_plan_miss_tex,profile_plan_miss_layout,profile_plan_miss_samp;
+    /* epoch miss 的四个来源细分 */
+    uint64_t profile_plan_miss_unresolved,profile_plan_miss_epochgen,profile_plan_miss_state,
+             profile_plan_miss_registry,profile_plan_miss_pool,profile_plan_miss_noset;
     TSlot *tslot; size_t texture_slots; SSlot sslot[LIMIT_OBJECTS]; int texture_pool_n;
 
     VBuffer *retired_buffers[TEMP_POOL_COUNT];uint64_t retired_age[TEMP_POOL_COUNT],retired_bytes,retire_clock;
@@ -267,7 +274,7 @@ static struct {
     uint64_t image_usage_omitted,image_usage_storage,image_promotions,image_retired_live;
     uint64_t resource_flushes,resource_kept,resource_views,resource_passes,resource_hits;
     uint64_t profile_view_hits,profile_view_misses,profile_framebuffer_hits,profile_framebuffer_misses;
-    int active,feedback_layout,shader_draw_parameters,shader_image_gather_extended,mirror_clamp,null_descriptors,portable_draw_parameters;
+    int active,feedback_layout,shader_draw_parameters,shader_image_gather_extended,mirror_clamp,null_descriptors,portable_draw_parameters,bc_native;
     int shader_clip_distance,shader_cull_distance;
     ReplayState state; VkPhysicalDeviceSubgroupProperties subgroup;
     NvnVkGpuProfile profile; NvnVkQuirkRegistry quirks;
@@ -275,7 +282,7 @@ static struct {
     uint8_t *shader_index; size_t index_bytes;uint32_t shader_index_version;int shader_code_identity; char shader_root[1024]; ANativeWindow *window;int vi_crop[4];
     ShaderEntry *shader_entries;size_t shader_entry_capacity;ShaderLookup shader_lookup[SHADER_LOOKUP];
     VkSurfaceKHR surface; VkSwapchainKHR swapchain; VkImage *swap_images; VkImageLayout *swap_layouts;
-    uint32_t nswap; VkFormat swap_format; VkExtent2D swap_extent; int display_hz;
+    uint32_t nswap; VkFormat swap_format; VkExtent2D swap_extent; int display_hz; VkPresentModeKHR present_mode;
     VTexture present_encoding_bridge;
     _Atomic uint64_t fence,completed,present_count,frame; uint64_t draws,pass_count,uploads,pool_adds;
     int trace_frame,trace_ui,capture_feedback;_Atomic int window_origin,depth_mode;
@@ -285,7 +292,18 @@ static struct {
     uint64_t profile_writeback_raw_bytes,profile_writeback_raw_ranges,profile_writeback_copy_ranges,profile_writeback_plan_cpu_ns;
     uint64_t profile_write_submits,profile_event_submits,profile_report_submits,profile_trace_submits,profile_cpu_readback_submits,profile_event_wait_submits;
 
-    uint64_t profile_desc_alloc_ns,profile_desc_update_ns,profile_prep_ns,profile_lookup_ns,profile_pool_ns,profile_bind_ns,profile_render_ns,profile_present_ns;unsigned trace_meshes;
+    uint64_t profile_desc_alloc_ns,profile_desc_update_ns,profile_prep_ns,profile_lookup_ns,profile_pool_ns,profile_bind_ns,profile_render_ns,profile_present_ns;
+/* pool_read 内部两段计时（dirty 查询 / mprotect 保护）+ 调用次数 */
+uint64_t profile_dirty_query_ns,profile_dirty_protect_ns,profile_dirty_calls;
+/* 池拷贝（guest → Vulkan 镜像）的耗时与规模：看是不是 O(n²) 的写入区间扫描在拖慢 */
+uint64_t profile_span_copy_ns,profile_span_copies,profile_span_complexity;
+/* pool_use_mark 的位图标记耗时（256B 页时一次 833KB 读要标 3254 次）
+ * Bitmap marking cost in pool_use_mark (a single 833 KB read marks 3,254 pages at 256 B). */
+uint64_t profile_usemark_ns;
+/* pool_conflict_wait 的检查次数（判断位图扫描本身的规模） */
+uint64_t profile_conflict_checks;
+/* 每帧 nwrites 峰值：fully_gpu_owned 与 span 拷贝的线性扫描规模 */
+size_t profile_nwrites_peak;unsigned trace_meshes;
     int pool_range_stats,pool_owned_bypass;
     uint64_t profile_owned_reads,profile_owned_bytes;
     struct {uint64_t reads,hits,protects,read_bytes,protect_bytes,uniforms;} pool_ranges[9];
@@ -297,7 +315,7 @@ static struct {
     int attachment_index_valid;
     uint32_t npacc;
 
-    PassAcc pacc[128];char skip_ps[17];struct{char key[17];uint32_t draws;}hot[64];uint32_t nhot;int disable_desc_cache,disable_control_cache,diag_no_occlusion,diag_img_usage,barrier_pass_elide,pass_side_effects,diag_no_pass_deps,precise_sync,draw_store,xition_vertex;uint64_t profile_wait_elided,profile_hz_barriers,hz_count[8];int hz_diag,chunk_draws,chunk_log,profile_detail,seg_index,diag_skip_draws,diag_skip_xfer,diag_skip_class,diag_shape,enable_narrow_access,diag_fixed_desc,disable_wait_elision,want_cached,wb_stage_enabled,wb_stage_type,disable_setrt_skip,disable_subres,disable_pass_reuse,disable_cpu_uniform_snapshot;uint64_t setrt_total,setrt_same;char pass_desc[96],last_ps[20],last_uses[100];int last_count,last_barrier_bits;uint64_t pass_draws0;uint64_t gts_busy[4],gts_span[4],gts_gap[4],gts_chunks[4],pres_acq_ns,pres_fence_ns,pres_idle_ns,pres_submit_ns,seg_begin_ns,seg_record_ns[4],seg_wait_ns[4],seg_tail_ns[4],seg_draws[4],seg_chunks[4];uint64_t profile_chunks;uint32_t barrier_bits[256],barrier_kept[256],barrier_nopass,barrier_sidefx;uint32_t barrier_sites[4096],pass_end_sites[4096];
+    PassAcc pacc[128];char skip_ps[17],skip_cs[17];struct{char key[17];uint32_t draws;}hot[64];uint32_t nhot;int disable_desc_cache,disable_control_cache,diag_no_occlusion,diag_img_usage,barrier_pass_elide,pass_side_effects,diag_no_pass_deps,precise_sync,draw_store,xition_vertex;uint64_t profile_wait_elided,profile_hz_barriers,hz_count[8];int hz_diag,chunk_draws,chunk_log,profile_detail,seg_index,diag_skip_draws,diag_skip_xfer,diag_skip_class,diag_shape,enable_narrow_access,diag_fixed_desc,disable_wait_elision,want_cached,wb_stage_enabled,wb_stage_type,disable_setrt_skip,disable_subres,disable_pass_reuse,disable_cpu_uniform_snapshot;uint64_t setrt_total,setrt_same;char pass_desc[96],last_ps[20],last_uses[100];int last_count,last_barrier_bits;uint64_t pass_draws0;uint64_t gts_busy[4],gts_span[4],gts_gap[4],gts_chunks[4],pres_acq_ns,pres_fence_ns,pres_idle_ns,pres_submit_ns,seg_begin_ns,seg_record_ns[4],seg_wait_ns[4],seg_tail_ns[4],seg_draws[4],seg_chunks[4];uint64_t profile_chunks;uint32_t barrier_bits[256],barrier_kept[256],barrier_nopass,barrier_sidefx;uint32_t barrier_sites[4096],pass_end_sites[4096];
     ControlCache *control_cache;
     uint64_t profile_desc_hits,profile_desc_misses,profile_control_hits,profile_control_misses,profile_control_evict,profile_control_changed,profile_barriers_skipped,profile_sample_copy_hits,profile_sample_copy_misses;
     uint64_t profile_passes,profile_barriers,profile_uniform_updates,profile_cpu_snapshots,profile_gpu_copies,profile_snapshot_reuses;char trace_shader[17];
@@ -316,6 +334,23 @@ static struct {
     pthread_mutex_t lock;
     void *transfer_memory; size_t transfer_size; int graphics_live;
 } G={.lock=PTHREAD_MUTEX_INITIALIZER};
+/* 取查询结果，容错版。Mali 在报过 GROUP_ERROR_FATAL 之后这里会返回
+ * VK_ERROR_DEVICE_LOST；原来这几处走 CHECK() → abort()，于是「新建角色」那一段
+ * （一次性上传 7 个职业模型的纹理，GPU 报错）必然把整个应用打死，玩家的会话一起没了。
+ * 取到的只是遮挡剔除用的采样数与性能时间戳：驱动给不出来就当 0，这一帧少剔除或者
+ * 少一条计时，不要把应用终止。
+ * Tolerant query read. After Mali reports GROUP_ERROR_FATAL this returns
+ * VK_ERROR_DEVICE_LOST. These sites used CHECK() → abort(), so the "create new character"
+ * step (which uploads the textures of all seven class models in one burst, faulting the GPU)
+ * always killed the whole app and the player's session with it. What is at stake is only the
+ * sample count used for occlusion culling and a profiling timestamp: when the driver cannot
+ * deliver them, use zero for that frame instead of terminating. */
+static void query_read_tolerant(VkQueryPool pool,uint32_t count,size_t bytes,void *data,const char *what) {
+    VkResult result=vkGetQueryPoolResults(G.device,pool,0,count,bytes,data,8,VK_QUERY_RESULT_64_BIT|VK_QUERY_RESULT_WAIT_BIT);
+    if(result==VK_SUCCESS)return;
+    static int reported;if(reported<8){reported++;fprintf(stderr,"[nvn-vulkan] QUERY_READ_FAILED %s result=%d; using zeros for this frame (the GPU already reported an error)\n",what,(int)result);fflush(stderr);}
+    memset(data,0,bytes);
+}
 static void pipeline_manifest_flush(void);
 #include "nvn_vk_pipeline_cache_runtime.inc"
 /* Immutable per-device capabilities. Binding the same format should not call
@@ -513,12 +548,30 @@ static void backend_init(void) {
         Dl_info info;char directory[1024];
         if(!dladdr((void *)backend_init,&info) || !info.dli_fname || strlen(info.dli_fname)>=sizeof(directory))die("private Vulkan native library directory",0);
         strcpy(directory,info.dli_fname);char *slash=strrchr(directory,'/');if(!slash)die("private Vulkan native path",0);slash[1]=0;
-        char tool_path[1100];snprintf(tool_path,sizeof tool_path,"%slibadrenotools.so",directory);
-        void *tool=dlopen(tool_path,RTLD_NOW|RTLD_LOCAL);if(!tool)die("private Vulkan adrenotools load",0);
-        void *(*open_driver)(int,int,const char *,const char *,const char *,const char *,const char *,void **)=dlsym(tool,"adrenotools_open_libvulkan");
-        if(!open_driver)die("private Vulkan driver entry",0);
-        loader=open_driver(RTLD_NOW|RTLD_LOCAL,1,NULL,directory,directory,"libd2r_turnip.so",NULL,NULL);
-        if(!loader)die("private Vulkan loader failed",0);
+        /* Turnip（Mesa freedreno）是纯开源驱动，不需要 adrenotools 的命名空间隔离，可以直接打开。
+         * 前提是它不再声明 app 命名空间看不到的系统库：随包的 libd2r_turnip.so 已把
+         * libhardware/libnativewindow/libsync 三个「只声明、未引用任何符号」的 DT_NEEDED 去掉
+         * （readelf 证实其 UND 符号只有 @LIBC 的 215 个），因此这里能直接加载。
+         * adrenotools 分支保留为回退，接口与上游一致。
+         * Turnip (Mesa freedreno) is a pure open-source driver and needs none of adrenotools'
+         * namespace isolation, so it can be opened directly. That works only because the shipped
+         * libd2r_turnip.so no longer declares the system libraries an app namespace cannot see:
+         * its libhardware/libnativewindow/libsync DT_NEEDED entries only declared those names while
+         * referencing no symbols from them (readelf shows its UND symbols are 215 @LIBC entries).
+         * The adrenotools branch stays as a fallback, keeping upstream's interface intact. */
+        char direct_path[1100];snprintf(direct_path,sizeof direct_path,"%slibd2r_turnip.so",directory);
+        loader=dlopen(direct_path,RTLD_NOW|RTLD_LOCAL);
+        if(loader)fprintf(stderr,"[nvn-vulkan] PRIVATE_VULKAN direct=%s\n",direct_path);
+        else{
+            const char *why=dlerror();
+            fprintf(stderr,"[nvn-vulkan] PRIVATE_VULKAN direct dlopen failed: %s\n",why?why:"(no detail)");
+            char tool_path[1100];snprintf(tool_path,sizeof tool_path,"%slibadrenotools.so",directory);
+            void *tool=dlopen(tool_path,RTLD_NOW|RTLD_LOCAL);if(!tool)die("private Vulkan adrenotools load",0);
+            void *(*open_driver)(int,int,const char *,const char *,const char *,const char *,const char *,void **)=dlsym(tool,"adrenotools_open_libvulkan");
+            if(!open_driver)die("private Vulkan driver entry",0);
+            loader=open_driver(RTLD_NOW|RTLD_LOCAL,1,NULL,directory,directory,"libd2r_turnip.so",NULL,NULL);
+            if(!loader)die("private Vulkan loader failed",0);
+        }
     }else loader=dlopen("libvulkan.so",RTLD_NOW|RTLD_LOCAL);
     if(!loader)die("Vulkan loader unavailable",0);
     dm_vk_get=(PFN_vkGetInstanceProcAddr)dlsym(loader,"vkGetInstanceProcAddr");if(!dm_vk_get)die("Vulkan proc address unavailable",0);
@@ -638,7 +691,32 @@ static void backend_init(void) {
     {VkFormatProperties bc1,bc3,bc7,astc,etc2;vkGetPhysicalDeviceFormatProperties(G.physical,VK_FORMAT_BC1_RGBA_UNORM_BLOCK,&bc1);vkGetPhysicalDeviceFormatProperties(G.physical,VK_FORMAT_BC3_UNORM_BLOCK,&bc3);
      vkGetPhysicalDeviceFormatProperties(G.physical,VK_FORMAT_BC7_UNORM_BLOCK,&bc7);vkGetPhysicalDeviceFormatProperties(G.physical,VK_FORMAT_ASTC_4x4_UNORM_BLOCK,&astc);vkGetPhysicalDeviceFormatProperties(G.physical,VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK,&etc2);
      fprintf(stderr,"[nvn-vulkan] TEXTURE_COMPRESSION feature_bc=%u feature_astc_ldr=%u feature_etc2=%u bc1=%#x bc3=%#x bc7=%#x astc4x4=%#x etc2=%#x\n",available.textureCompressionBC,available.textureCompressionASTC_LDR,available.textureCompressionETC2,
-         (unsigned)bc1.optimalTilingFeatures,(unsigned)bc3.optimalTilingFeatures,(unsigned)bc7.optimalTilingFeatures,(unsigned)astc.optimalTilingFeatures,(unsigned)etc2.optimalTilingFeatures);}
+         (unsigned)bc1.optimalTilingFeatures,(unsigned)bc3.optimalTilingFeatures,(unsigned)bc7.optimalTilingFeatures,(unsigned)astc.optimalTilingFeatures,(unsigned)etc2.optimalTilingFeatures);
+    /* 设备能自己采样 BC 时就不该在 CPU 上解：上游的 BC 解码是为 Metal 准备的（Metal 不支持 BC），
+     * 而 Vulkan 侧 Turnip / Adreno 都原生支持。实测这台设备每帧有几十次 BC_STREAM_REFRESH，
+     * CPU 解码占了约 28% 的帧时间。用 TEXTURE_SAMPLED_BIT 判断「能不能被采样器直接读」，
+     * 比只看 feature_bc 更严格（后者只说明可创建，不保证可采样）。
+     * When the device can sample BC itself the CPU must not decode it: the decoder exists for
+     * Metal, which has no BC, while on the Vulkan side Turnip and Adreno both support it natively.
+     * This device did dozens of BC_STREAM_REFRESH per frame, with CPU decode costing about 28% of
+     * frame time. TEXTURE_SAMPLED_BIT is the right test (feature_bc only says an image can be
+     * created, not that a sampler can read it). */
+    /* 结论：原生 BC 采样在 Turnip 上「帧率对、画面错」——角色变黑剪影、篝火成白方块、
+     * 出现彩色噪点。纹理格式选对了，但压缩块的排布/视图语义与 nvn_tex_layout 算出的
+     * 存储布局不一致（NVN 的 tile 化存储 ≠ Vulkan 线性 BC 块序）。帧率提升是假象：
+     * 只是跳过了 CPU 解码，画面根本没画对。因此默认关闭，只有显式 DM_BC_NATIVE=1 才启用。
+     * Result: native BC sampling on Turnip is "right frame rate, wrong picture" — the character
+     * becomes a black silhouette, the campfire a white block, with colour noise. The format was
+     * chosen correctly, but the compressed block layout does not match the storage layout that
+     * nvn_tex_layout computes (NVN tiles storage; Vulkan BC blocks are linear). The frame-rate gain
+     * was an illusion: it only skipped the CPU decode while nothing was drawn correctly. Off by
+     * default; enabled only by an explicit DM_BC_NATIVE=1. */
+    G.bc_native=available.textureCompressionBC &&
+        (bc1.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) &&
+        (bc3.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) &&
+        (bc7.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+    if(!getenv("DM_BC_NATIVE"))G.bc_native=0;
+    fprintf(stderr,"[nvn-vulkan] BC_NATIVE %d (native BC sampling; wrong picture on Turnip, off by default)\n",G.bc_native);}
     enabled.samplerAnisotropy=available.samplerAnisotropy;
     enabled.depthBiasClamp=available.depthBiasClamp;G.depth_bias_clamp=enabled.depthBiasClamp;
     enabled.depthClamp=available.depthClamp;G.depth_clamp_available=enabled.depthClamp;
@@ -696,6 +774,7 @@ static void backend_init(void) {
     G.disable_query_batch=getenv("DM_DISABLE_QUERY_BATCH")!=NULL;G.diag_no_occlusion=getenv("DM_DIAG_NO_OCCLUSION")!=NULL;G.barrier_pass_elide=getenv("DM_BARRIER_PASS_ELIDE")!=NULL;G.diag_no_pass_deps=getenv("DM_DIAG_NO_PASS_DEPS")!=NULL;G.precise_sync=getenv("DM_DISABLE_PRECISE_SYNC")==NULL;{const char *hd=getenv("DM_HZ_DIAG");G.hz_diag=hd?atoi(hd):0;}{const char *cd=getenv("DM_CHUNK_DRAWS");G.chunk_draws=cd?atoi(cd):48;G.chunk_log=getenv("DM_RESOURCE_STATS")!=NULL;G.profile_detail=getenv("DM_PROFILE_DETAIL")!=NULL;G.diag_skip_draws=getenv("DM_DIAG_SKIP_DRAWS")!=NULL;{const char *sh=getenv("DM_DIAG_SHAPE");G.diag_shape=sh?atoi(sh):0;}G.disable_setrt_skip=getenv("DM_DISABLE_SETRT_SKIP")!=NULL;G.disable_subres=getenv("DM_DISABLE_SUBRES")!=NULL;G.enable_narrow_access=getenv("DM_NARROW_ACCESS")!=NULL;G.diag_fixed_desc=getenv("DM_DIAG_FIXED_DESC")!=NULL;G.disable_wait_elision=getenv("DM_DISABLE_WAIT_ELISION")!=NULL;G.async_enabled=getenv("DM_DISABLE_ASYNC_COMMIT")==NULL;G.async_drain_after_submit=getenv("DM_ASYNC_DRAIN")!=NULL;{const char *sc=getenv("DM_DIAG_SKIP_CLASS");G.diag_skip_class=sc?atoi(sc):0;}G.wb_stage_enabled=getenv("DM_DISABLE_WB_STAGE")==NULL;G.disable_pass_reuse=getenv("DM_DISABLE_PASS_REUSE")!=NULL;G.disable_cpu_uniform_snapshot=getenv("DM_DISABLE_CPU_UNIFORM_SNAPSHOT")!=NULL;{const char *sx=getenv("DM_DIAG_SKIP_XFER");G.diag_skip_xfer=sx?atoi(sx):0;}}fprintf(stderr,"[nvn-vulkan] PRECISE_SYNC=%d hz_diag=%d\n",G.precise_sync,G.hz_diag);{const char *iu=getenv("DM_DIAG_IMG_USAGE");G.diag_img_usage=iu?atoi(iu):0;}
     {const char *range=getenv("DM_QUERY_RESET_RANGE");G.enable_query_reset_range=range&&atoi(range)!=0;}
     G.disable_desc_cache=getenv("DM_DISABLE_DESC_CACHE")!=NULL;G.disable_control_cache=getenv("DM_DISABLE_CONTROL_CACHE")!=NULL;G.disable_barrier_elision=getenv("DM_DISABLE_BARRIER_ELISION")!=NULL;G.disable_sample_copy_cache=getenv("DM_DISABLE_SAMPLE_COPY_CACHE")!=NULL;G.pass_timing=getenv("DM_PASS_TIMING")!=NULL||G.pass_stats;{const char *sk=getenv("DM_SKIP_PS");if(sk){strncpy(G.skip_ps,sk,16);G.skip_ps[16]=0;fprintf(stderr,"[nvn-vulkan] DIAG_SKIP_PS key=%s (timing diagnostic only)\n",G.skip_ps);}}
+    {const char *sc=getenv("DM_SKIP_CS");if(sc){strncpy(G.skip_cs,sc,16);G.skip_cs[16]=0;fprintf(stderr,"[nvn-vulkan] DIAG_SKIP_CS key=%s\n",G.skip_cs);}}
     G.disable_resource_cache=getenv("DM_DISABLE_RESOURCE_CACHE")!=NULL;
     {const char *retain=getenv("DM_VK_RETAIN_RESOURCES");G.retain_resources=!retain||atoi(retain)!=0;}
     {const char *usage=getenv("DM_VK_IMAGE_USAGE_FLAGS");G.image_usage_by_flags=!usage||atoi(usage)!=0;}
@@ -708,7 +787,18 @@ static void backend_init(void) {
     {const char *coalesce=getenv("DM_WRITEBACK_COALESCE");G.enable_writeback_coalesce=coalesce&&atoi(coalesce)!=0;}
     G.event_trace=getenv("DM_EVENT_TRACE")!=NULL;
     G.current_submission=&G.submission_slot;
-    {const char *rs=getenv("DM_RENDER_SLOTS");int n=rs?atoi(rs):1;G.render_slots_n=n<1?1:n>4?4:n;G.render_ring_next=0;
+    /* 渲染槽位缺省 2（上游是 1）。实测两槽让 CPU 提交与 GPU 执行重叠：
+     *   gpu_wait_ms      416 → 30（降 93%）
+     *   excluded_fence_ms 523 → 136（降 74%）
+     *   fps               37 → 48.8（局内 53.7）
+     * 三槽与两槽基本持平（48.5 vs 49.7）但每个槽有独立资源缓存、涨显存，所以缺省取 2。
+     * 想回上游行为用 DM_RENDER_SLOTS=1。
+     * Render slots default to 2 (upstream uses 1). Measured with two slots, CPU submission and GPU
+     * execution overlap: gpu_wait 416 → 30 ms (-93%), excluded_fence 523 → 136 ms (-74%),
+     * fps 37 → 48.8 (53.7 in game). Three slots are on par with two (48.5 vs 49.7) but each slot
+     * owns a resource cache and costs memory, so 2 is the default. Use DM_RENDER_SLOTS=1 for the
+     * upstream behaviour. */
+    {const char *rs=getenv("DM_RENDER_SLOTS");int n=rs?atoi(rs):2;G.render_slots_n=n<1?1:n>4?4:n;G.render_ring_next=0;
      {const char *df=getenv("DM_DIAG_DUMP_FRAME");G.dump_frame=df?(uint64_t)strtoull(df,NULL,10):0;}
      G.submission_slot.slot_index=0;for(int i=1;i<4;i++)G.extra_render_slots[i-1].slot_index=i;G.submission_slot2.slot_index=-1;
      fprintf(stderr,"[nvn-vulkan] RENDER_SLOTS n=%d\n",G.render_slots_n);}
@@ -776,32 +866,99 @@ static void pool_materialize(VPool *pool) {
     fprintf(stderr,"[nvn-vulkan] POOL_MATERIALIZE bytes=%llu resident=%llu logical=%llu pools=%d\n",(unsigned long long)pool->size,(unsigned long long)resident,(unsigned long long)logical,G.npool);
 }
 /* Render-slot overlap guard. With several render slots in flight, CPU writes to a pool mirror (guest uploads, CPU snapshots)
- * must not land on pages an earlier in-flight slot still reads or writes. Each slot keeps 4 KiB page bitmaps per pool; a
- * real conflict waits for that slot's GPU fence and is counted, so a clean run shows slot_conflicts=0. */
+ * must not land on pages an earlier in-flight slot still reads or writes. Each slot keeps a page bitmap per pool; a
+ * real conflict waits for that slot's GPU fence and is counted, so a clean run shows slot_conflicts=0.
+ *
+ * 场景实测（骁龙 8G3 + Turnip，2000×3200）：双槽时 conflicts=110,523/60帧（1,842 次/帧），
+ * completion_fence_wait_ms=605，占整帧 1247 ms 的 48%，是当前第一瓶颈。冲突来自位图粒度：
+ * SHIFT=8 即 256 字节一页，1MB 档每帧读 645 MB 会把位图几乎全部填满，于是任何上传都会撞上。
+ * 上游注释写的是 4 KiB，与 SHIFT=8 的 256 字节不一致——这里按实测逐档试。
+ * Measured (Snapdragon 8G3 + Turnip, 2000×3200): with two slots conflicts=110,523 per 60 frames
+ * (1,842 per frame) and completion_fence_wait_ms=605 — 48% of the 1247 ms frame, the top
+ * bottleneck. Conflicts come from bitmap granularity: SHIFT=8 is a 256-byte page, and the 1 MB
+ * bucket reads 645 MB per frame, filling nearly the whole bitmap so any upload collides. The
+ * upstream comment says 4 KiB, which contradicts the 256 bytes of SHIFT=8; here it is tried per
+ * size against real measurements. */
+#ifndef SLOT_PAGE_SHIFT
 #define SLOT_PAGE_SHIFT 8
+#endif
+/* 运行期可覆盖的页粒度：DM_SLOT_PAGE_SHIFT=6..12。位图内存在 pool_use_alloc 里按它分配，
+ * 所以必须在第一次分配之前定下来（一次性初始化）。粒度越细位图越大、冲突越少：
+ *   6 = 64 B（位图 ×4）、8 = 256 B（缺省）、10 = 1 KiB、12 = 4 KiB（上游注释所写的值）。
+ * A runtime page granularity, overridable with DM_SLOT_PAGE_SHIFT=6..12. The bitmap is allocated
+ * from it in pool_use_alloc, so it is fixed once, before the first allocation. Finer granularity
+ * means a larger bitmap and fewer conflicts:
+ *   6 = 64 B (bitmap ×4), 8 = 256 B (default), 10 = 1 KiB, 12 = 4 KiB (what the upstream comment says). */
+static unsigned slot_page_shift(void) {
+    static unsigned shift;
+    if (!shift) {
+        const char *e = getenv("DM_SLOT_PAGE_SHIFT");
+        unsigned v = e ? (unsigned)strtoul(e, NULL, 0) : (unsigned)SLOT_PAGE_SHIFT;
+        if (v < 6 || v > 16) v = SLOT_PAGE_SHIFT;
+        shift = v;
+        fprintf(stderr, "[nvn-vulkan] SLOT_PAGE_SHIFT %u (page=%u bytes)\n", shift, 1u << shift);
+    }
+    return shift;
+}
 static VkSubmission *render_slot_ptr(int i){return i?&G.extra_render_slots[i-1]:&G.submission_slot;}
 static void pool_use_alloc(VPool *p){
     if(G.render_slots_n<2||p->use_rd[0])return;
-    size_t words=(size_t)(((p->size>>SLOT_PAGE_SHIFT)+1+31)/32);
+    unsigned sh=slot_page_shift();
+    size_t words=(size_t)(((p->size>>sh)+1+31)/32);
     for(int i=0;i<G.render_slots_n;i++){p->use_rd[i]=calloc(words,4);p->use_wr[i]=calloc(words,4);if(!p->use_rd[i]||!p->use_wr[i])die("slot use bitmap allocation",i);}
 }
 static void pool_use_mark(VPool *p,uint64_t off,uint64_t len,int write){
     if(!p->use_rd[0]||!len||S.slot_index<0)return;
+    unsigned sh=slot_page_shift();
     uint32_t *bm=write?p->use_wr[S.slot_index]:p->use_rd[S.slot_index];
-    for(uint64_t pg=off>>SLOT_PAGE_SHIFT,e=(off+len-1)>>SLOT_PAGE_SHIFT;pg<=e;pg++)bm[pg>>5]|=1u<<(pg&31);
+    /* 整字批量置位，不再逐页 shift/mask。原来每页一次 bm[pg>>5]|=1u<<(pg&31)：
+     * 256 B 页时一次 833 KB 读就要执行 3254 次，实测占整帧 4.6 ms（pool_ms 的 50%）。
+     * 现在把首尾两个不满的字节单独处理，中间整字直接写 0xFFFFFFFF。
+     * Set whole words at once instead of shifting and masking per page. The old loop ran
+     * bm[pg>>5]|=1u<<(pg&31) once per page — 3,254 iterations for a single 833 KB read at 256 B
+     * pages, measured at 4.6 ms per frame (50% of pool_ms). Now only the two partial words at the
+     * ends are handled bit by bit and the middle words are written as 0xFFFFFFFF. */
+    uint64_t first=off>>sh,last=(off+len-1)>>sh;
+    uint64_t w0=first>>5,w1=last>>5;
+    uint32_t lo= (uint32_t)(first&31), hi=(uint32_t)(last&31);
+    /* 掩码：从 bit lo 到 bit hi（含）全 1。lo > hi 时只能跨字，那种情况走下面两支。
+     * Mask: bits lo through hi inclusive. lo > hi can only happen across words, handled below. */
+    uint32_t span=(hi==31)?0xffffffffu:((1u<<(hi+1))-1u);
+    uint32_t head=0xffffffffu<<lo;
+    if(w0==w1){ bm[w0]|=head&span; return; }
+    bm[w0]|=head;
+    for(uint64_t w=w0+1;w<w1;w++)bm[w]=0xffffffffu;
+    bm[w1]|=span;
 }
 static void pool_use_clear(int idx){
+    unsigned sh=slot_page_shift();
     for(int i=0;i<G.npool;i++){VPool *p=&G.pools[i];if(!p->use_rd[0])continue;
-        size_t words=(size_t)(((p->size>>SLOT_PAGE_SHIFT)+1+31)/32);memset(p->use_rd[idx],0,words*4);memset(p->use_wr[idx],0,words*4);}
+        size_t words=(size_t)(((p->size>>sh)+1+31)/32);memset(p->use_rd[idx],0,words*4);memset(p->use_wr[idx],0,words*4);}
 }
 static int ctx_busy(const VkSubmission *c);
+/* 位图范围里有没有任一位置 1：整字判断，不再逐页 shift/mask。
+ * 逐页版在 256 B 页时一次 833 KB 检查要跑 3254 轮 × 每个槽位，和 pool_use_mark 是同一个病。
+ * Whether any bit in the bitmap range is set: decided per word instead of per page with shift/mask.
+ * The per-page version ran 3,254 iterations per 833 KB check at 256 B pages, times every slot —
+ * the same disease as pool_use_mark. */
+static inline int bitmap_any(const uint32_t *bm,uint64_t first,uint64_t last){
+    uint64_t w0=first>>5,w1=last>>5;
+    uint32_t lo=(uint32_t)(first&31), hi=(uint32_t)(last&31);
+    uint32_t span=(hi==31)?0xffffffffu:((1u<<(hi+1))-1u);
+    uint32_t head=0xffffffffu<<lo;
+    if(w0==w1)return (bm[w0]&head&span)!=0;
+    if(bm[w0]&head)return 1;
+    for(uint64_t w=w0+1;w<w1;w++)if(bm[w])return 1;
+    return (bm[w1]&span)!=0;
+}
 static void pool_conflict_wait(VPool *p,uint64_t off,uint64_t len,int cpu_writes){
     if(!p->use_rd[0]||!len||S.slot_index<0)return;
-    uint64_t first=off>>SLOT_PAGE_SHIFT,last=(off+len-1)>>SLOT_PAGE_SHIFT;
+    if(++G.profile_conflict_checks==0)G.profile_conflict_checks=1;
+    unsigned sh=slot_page_shift();
+    uint64_t first=off>>sh,last=(off+len-1)>>sh;
     for(int j=0;j<G.render_slots_n;j++){
         VkSubmission *c=render_slot_ptr(j);if(j==S.slot_index||c->phase!=SUBMISSION_INFLIGHT)continue;
-        int hit=0;
-        for(uint64_t pg=first;pg<=last&&!hit;pg++){uint32_t m=1u<<(pg&31);hit=(p->use_wr[j][pg>>5]&m)||(cpu_writes&&(p->use_rd[j][pg>>5]&m));}
+        int hit=bitmap_any(p->use_wr[j],first,last)||(cpu_writes&&bitmap_any(p->use_rd[j],first,last));
         if(!hit)continue;
         G.slot_conflicts++;CHECK(cpu_work_wait_fences(G.device,1,&c->gpu_fence,VK_TRUE,UINT64_MAX));
     }
@@ -828,6 +985,12 @@ void mtl_pool_del(const void *mem) {
 }
 static int overlap(uint64_t a,uint64_t an,uint64_t b,uint64_t bn) { return a<b+bn && b<a+an; }
 static int fully_gpu_owned(Range range) {
+    /* 诊断：nwrites 是这一帧累计的写入区间数（上限 4096），"完全被 GPU 覆盖"的判断要遍历它。
+     * 每帧记一次峰值，用来判断这个线性扫描是否值得建索引。
+     * Diagnostics: nwrites is the write-range count accumulated this frame (capped at 4096) and the
+     * full-coverage test scans it. Record the per-frame peak to judge whether the linear scan
+     * warrants an index. */
+    if((size_t)S.nwrites>G.profile_nwrites_peak)G.profile_nwrites_peak=(size_t)S.nwrites;
     return nvn_vk_pool_fully_gpu_owned(range.addr,range.size,S.writes,(size_t)S.nwrites);
 }
 static int cached_snapshot(Range range,VBuffer **buffer) {
@@ -845,7 +1008,21 @@ static int cached_snapshot(Range range,VBuffer **buffer) {
 }
 static void pool_upload_guest_span(VPool *p,uint64_t base,uint64_t base_off,uint64_t addr,uint64_t len) {
     pool_conflict_wait(p,base_off+(addr-base),len,1);
+    /* 诊断：这段拷贝要遍历 S.nwrites 个写入区间（上限 4096），大块 + 多次读时是 O(n²)。
+     * 分开记 memcpy 时间与遍历时间，看该不该给写入区间建索引。
+     * Diagnostics: this copy scans S.nwrites write ranges (capped at 4096), which is O(n²) for large
+     * spans read repeatedly. Timing the memcpy apart from the scan tells whether the write ranges
+     * need an index. */
+    uint64_t t0=prof_now();
+    size_t writes_before=S.nwrites;
     G.profile_pool_uploaded_bytes+=nvn_vk_pool_copy_guest_span(p->v.map,base,base_off,addr,len,S.writes,S.nwrites);
+    uint64_t dt=prof_now()-t0;
+    G.profile_span_copy_ns+=dt;G.profile_span_copies++;
+    /* 粗估遍历代价：每段的扫描次数 ≈ nwrites × 段数；用 nwrites 做一次线性近似记账，
+     * 不追求精确，只看它是不是主要项。
+     * Rough scan-cost estimate recorded with the write count; not exact, only to see whether the
+     * scan dominates. */
+    G.profile_span_complexity+=writes_before;
 }
 static unsigned pool_range_bucket(uint64_t len) {
     static const uint64_t bounds[]={64,256,1024,4096,16384,65536,262144,1048576};
@@ -855,7 +1032,9 @@ static VPool *pool_read_resolved(VPool *p,uint64_t addr,uint64_t len,uint64_t *o
     uint64_t started=prof_now();
     unsigned range_bucket=0;
     if(G.pool_range_stats){range_bucket=pool_range_bucket(len);G.pool_ranges[range_bucket].reads++;G.pool_ranges[range_bucket].read_bytes+=len;}
-    pool_materialize(p);pool_use_alloc(p);pool_use_mark(p,*off,len,0);
+    {uint64_t u0=prof_now();
+     pool_materialize(p);pool_use_alloc(p);pool_use_mark(p,*off,len,0);
+     G.profile_usemark_ns+=prof_now()-u0;}
     /* The existing guest-span copier omits every byte in queued write ranges.
      * When their union covers this entire read, no CPU upload is possible.
      * Leave the upload cache untouched: a later uncovered read still needs
@@ -870,7 +1049,14 @@ static VPool *pool_read_resolved(VPool *p,uint64_t addr,uint64_t len,uint64_t *o
      * conservatively invalidate overlapping CPU changes, while pool serials
      * prevent address reuse from inheriting old uploads. */
     PoolUpload *upload=NULL;uint64_t stamp=0,upload_stamp=0;int partial_upload=0;
+    /* 把 pool_read 的两段分开计时：dirty 查询（读页表，便宜）与 protect（mprotect，系统调用，贵）。
+     * pool_ms 是当前最大单项，不分段就不知道是该优化查询还是该减少保护。
+     * Time the two halves of pool_read separately: the dirty query (page-table read, cheap) and
+     * protect (mprotect, a syscall, expensive). pool_ms is the largest single item, and without
+     * splitting it there is no telling whether to optimize the query or reduce the protecting. */
+    uint64_t dirty_query_ns=0,dirty_protect_ns=0;
     if(len&&!G.disable_dirty_uploads&&nvn_dirty_tracked((const void *)(uintptr_t)addr,len)){
+        uint64_t q0=prof_now();
         uint64_t hash=addr^(addr>>19)^(len*0x9e3779b97f4a7c15ULL)^p->serial;
         PoolUpload *bucket=G.pool_uploads[hash&(UPLOAD_BUCKETS-1)];upload=&bucket[0];
         for(unsigned i=0;i<UPLOAD_WAYS;i++){
@@ -888,7 +1074,11 @@ static VPool *pool_read_resolved(VPool *p,uint64_t addr,uint64_t len,uint64_t *o
             if(entry->age<upload->age)upload=entry;
         }
         if(G.pool_range_stats){G.pool_ranges[range_bucket].protects++;G.pool_ranges[range_bucket].protect_bytes+=len;}
-        stamp=nvn_dirty_now();nvn_dirty_protect((const void *)(uintptr_t)addr,len);
+        dirty_query_ns=prof_now()-q0;
+        { uint64_t p0=prof_now();
+          stamp=nvn_dirty_now();nvn_dirty_protect((const void *)(uintptr_t)addr,len);
+          dirty_protect_ns=prof_now()-p0; }
+        G.profile_dirty_query_ns+=dirty_query_ns;G.profile_dirty_protect_ns+=dirty_protect_ns;G.profile_dirty_calls++;
     }
     /* A GPU-written range in this command stream must retain its queued value. */
     if(partial_upload) {
@@ -1302,9 +1492,9 @@ static void submission_complete_effects(VkSubmission *sub) {
         G.profile_writeback_global_mp_calls+=mp_calls-wb_mp_calls;G.profile_writeback_global_mp_pages+=mp_pages-wb_mp_pages;
     }
     uint64_t occ[LIMIT_WRITES],times[LIMIT_WRITES];
-    if(sub->nocc)CHECK(vkGetQueryPoolResults(G.device,sub->occlusion,0,sub->nocc,sub->nocc*8,occ,8,VK_QUERY_RESULT_64_BIT|VK_QUERY_RESULT_WAIT_BIT));
+    if(sub->nocc)query_read_tolerant(sub->occlusion,sub->nocc,sub->nocc*8,occ,"occlusion");
     if(G.present_count<2 || G.trace_frame)for(uint32_t i=0;i<sub->nocc;++i)fprintf(stderr,"[nvn-vulkan] DRAW_SAMPLES query=%u samples=%llu\n",i,(unsigned long long)occ[i]);
-    if(sub->ntime)CHECK(vkGetQueryPoolResults(G.device,sub->timestamps,0,sub->ntime,sub->ntime*8,times,8,VK_QUERY_RESULT_64_BIT|VK_QUERY_RESULT_WAIT_BIT));
+    if(sub->ntime)query_read_tolerant(sub->timestamps,sub->ntime,sub->ntime*8,times,"timestamp");
     for(int i=0;i<sub->ncounter;++i) {CounterOp *op=&sub->counter_ops[i];
         if(op->kind==0)G.samples_passed=0;
         else if(op->kind==1)G.samples_passed+=occ[op->query];
@@ -1546,6 +1736,29 @@ int mtl_wait(uint64_t fence,uint64_t timeout) {
 void mtl_finish(void) { mtl_init(); pthread_mutex_lock(&G.lock); async_drain_locked(); CHECK(cpu_work_queue_idle(G.queue)); pipeline_cache_checkpoint(0); pthread_mutex_unlock(&G.lock); }
 void mtl_drain(void) { mtl_finish(); }
 
+/* NVN 的 BC 编号 → Vulkan 压缩格式。只在设备能原生采样 BC 时使用（见 G.bc_native）；
+ * 设备不支持时走 nvn_bc_unpacked 的 CPU 解码路径（上游 Metal 路线）。
+ * NVN BC codes → Vulkan compressed formats. Used only when the device samples BC natively (see
+ * G.bc_native); otherwise the CPU decode path in nvn_bc_unpacked is used, as on the Metal route. */
+static VkFormat bc_format(int nvn) {
+    switch(nvn) {
+    case 0x41: case 0x42:return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+    case 0x43:return VK_FORMAT_BC2_UNORM_BLOCK;
+    case 0x44:return VK_FORMAT_BC3_UNORM_BLOCK;
+    case 0x45: case 0x46:return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+    case 0x47:return VK_FORMAT_BC2_SRGB_BLOCK;
+    case 0x48:return VK_FORMAT_BC3_SRGB_BLOCK;
+    case 0x49:return VK_FORMAT_BC4_UNORM_BLOCK;
+    case 0x4a:return VK_FORMAT_BC4_SNORM_BLOCK;
+    case 0x4b:return VK_FORMAT_BC5_UNORM_BLOCK;
+    case 0x4c:return VK_FORMAT_BC5_SNORM_BLOCK;
+    case 0x4d:return VK_FORMAT_BC7_UNORM_BLOCK;
+    case 0x4e:return VK_FORMAT_BC7_SRGB_BLOCK;
+    case 0x4f:return VK_FORMAT_BC6H_UFLOAT_BLOCK;
+    case 0x50:return VK_FORMAT_BC6H_SFLOAT_BLOCK;
+    default:die("NVN BC format",nvn);
+    }
+}
 static VkFormat format(int nvn) {
     switch(nvn) {
     case NVN_FORMAT_R8:return VK_FORMAT_R8_UNORM; case NVN_FORMAT_RG8:return VK_FORMAT_R8G8_UNORM;
@@ -1702,7 +1915,7 @@ static VTexture *texture_acquire(const tex_t *source,int upload,TextureRef ref) 
     if(!t){registry_slot=texture_table_slot(source->serial,&found);if(found)t=&G.textures[G.texture_table[registry_slot]-1];}
     if(t) {
         uint32_t decoded_format;int decoded_bpp;
-        if(upload&&!t->cpu_owned&&t->cpu_snapshot&&nvn_bc_unpacked(source->d.format,&decoded_format,&decoded_bpp)&&nvn_dirty_since(source->mem,source->L.size,t->upload_stamp)){
+        if(upload&&!G.bc_native&&!t->cpu_owned&&t->cpu_snapshot&&nvn_bc_unpacked(source->d.format,&decoded_format,&decoded_bpp)&&nvn_dirty_since(source->mem,source->L.size,t->upload_stamp)){
             refresh_compressed_cpu(t,source);return t;
         }
         // GPU render targets remain resident. Only CPU-backed sampled images
@@ -1723,7 +1936,12 @@ static VTexture *texture_acquire(const tex_t *source,int upload,TextureRef ref) 
     t->width=source->d.width; t->height=one?1:source->d.height;t->depth=volume?source->d.depth:1;t->layout=VK_IMAGE_LAYOUT_UNDEFINED;
     uint32_t metal_format=0; int decompressed_bpp=0;
     int bc=nvn_bc_unpacked(source->d.format,&metal_format,&decompressed_bpp);
-    if(bc) {
+    if(bc&&G.bc_native) {
+        /* 原生 BC：保留压缩格式与块大小，显存占 1/4~1/8，且不用 CPU 解码。
+         * Native BC: keep the compressed format and block size, so the image takes 1/4–1/8 of the
+         * decoded memory and no CPU decode happens. */
+        t->format=bc_format(source->d.format);t->bpp=source->L.bpb;
+    } else if(bc) {
         switch(metal_format) { case 10:t->format=VK_FORMAT_R8_UNORM;break;case 12:t->format=VK_FORMAT_R8_SNORM;break;
           case 30:t->format=VK_FORMAT_R8G8_UNORM;break;case 32:t->format=VK_FORMAT_R8G8_SNORM;break;
           case 70:t->format=VK_FORMAT_R8G8B8A8_UNORM;break;case 71:t->format=VK_FORMAT_R8G8B8A8_SRGB;break;
@@ -1747,7 +1965,13 @@ static VTexture *texture_acquire(const tex_t *source,int upload,TextureRef ref) 
 upload_existing:
     if(upload) {
         uint32_t decoded_format=0;int decoded_bpp=0;
-        int upload_bc=nvn_bc_unpacked(source->d.format,&decoded_format,&decoded_bpp);
+        /* 设备能原生采样 BC 时直接把压缩块传上去，不解码：既省掉每帧的 CPU 解码，
+         * 也省掉解码后 4~8 倍大的显存（BC1 4bpp → RGBA8 32bpp）。
+         * 只有设备不支持 BC 时才走 CPU 解码（上游的 Metal 路线）。
+         * With native BC sampling, upload the compressed blocks untouched: this drops the per-frame
+         * CPU decode and the 4–8× larger decoded image (BC1 4bpp → RGBA8 32bpp). The CPU decode
+         * path stays only for devices without BC, as on the upstream Metal route. */
+        int upload_bc=G.bc_native?0:nvn_bc_unpacked(source->d.format,&decoded_format,&decoded_bpp);
         if(!source->mem || !pool_find((uint64_t)(uintptr_t)source->mem,source->L.size,NULL)) die("packaged texture storage",source->serial);
         // Protect before reading and stamp before protection: any later CPU
         // write is newer than this snapshot, even if it races the upload.
@@ -1781,7 +2005,30 @@ upload_existing:
                     {.bufferOffset=pixels*4,.imageSubresource={VK_IMAGE_ASPECT_STENCIL_BIT,level,layer,1},.imageExtent={w,h,z}}};
                 vkCmdCopyBufferToImage(S.command,split->b,t->image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,2,copies);continue;
             }
-            VBuffer *staging=temporary((uint64_t)w*h*z*t->bpp,VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+            VBuffer *staging;
+            if(!upload_bc && G.bc_native && nvn_bc_unpacked(source->d.format,&decoded_format,&decoded_bpp)) {
+                /* 原生 BC：按压缩块的行跨距整块拷上去。t->bpp 对 BC 是「每块字节数」
+                 * （BC1/BC4=8、BC2/BC3/BC5/BC6H/BC7=16），行跨距 = 块列数 × 每块字节数。
+                 * 这里不能用 w*h*t->bpp，那是按每像素算的（只有解压路径才成立）。
+                 * Native BC: copy the compressed blocks with a block-row pitch. For BC, t->bpp is
+                 * bytes per block (BC1/BC4=8, BC2/BC3/BC5/BC6H/BC7=16), so the pitch is
+                 * blocks_per_row × bytes_per_block. w*h*t->bpp would be a per-pixel size and only
+                 * holds on the decoded path. */
+                uint32_t blocks_x=(w+3)/4,blocks_y=(h+3)/4;
+                uint64_t pitch=(uint64_t)blocks_x*t->bpp;
+                uint64_t total=pitch*blocks_y*z;
+                staging=temporary(total,VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+                memcpy(staging->map,linear,(size_t)total);
+                free(linear);
+                VkBufferImageCopy copy={.bufferRowLength=blocks_x*4,.bufferImageHeight=blocks_y*4,
+                    .imageSubresource={upload_aspect,level,layer,1},.imageExtent={w,h,z}};
+                if(z>1)copy.bufferImageHeight=blocks_y*4;
+                vkCmdCopyBufferToImage(S.command,staging->b,t->image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
+                G.profile_decode_ns+=dm_android_nvn_clock_ns()-decode_start;
+                t->cpu_owned=1;t->upload_stamp=stamp;tex_dirty(t); G.uploads++;
+                continue;
+            }
+            staging=temporary((uint64_t)w*h*z*t->bpp,VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
             if(upload_bc) {for(unsigned slice=0;slice<z;++slice)if(nvn_bc_decode(source->d.format,linear+slice*row*rows,row,w,h,staging->map+(size_t)slice*w*h*t->bpp,(size_t)w*t->bpp))die("BC decode",source->d.format); }
             else memcpy(staging->map,linear,(size_t)w*h*z*t->bpp); free(linear);
             VkBufferImageCopy copy={.imageSubresource={upload_aspect,level,layer,1},.imageExtent={w,h,z}};
@@ -2111,6 +2358,16 @@ static void shader_load_into(VShader *s,const char *key,uint32_t stage,int warm)
     }
     if(distance_words!=size/4)fprintf(stderr,"[nvn-vulkan] DISTANCE_CAPABILITY_REPAIR shader=%s mask=%u\n",s->key,distance_mask);
     free(bytes);bytes=(uint8_t *)distance_module;size=distance_words*4;
+    /* 诊断：把 clip/cull 能力修复之后的模块落盘，用于判断修复是否破坏了顶点属性反射
+     * （Location 装饰丢失/错位会导致 "vertex attribute reflection missing"）。
+     * Diagnostics: dump the module after the clip/cull capability repair, to tell whether the
+     * repair breaks the vertex-input reflection scan (a lost or shifted Location decoration
+     * surfaces as "vertex attribute reflection missing"). */
+    { const char *bd=adapted_shader_dir();
+      if(bd&&distance_words!=0&&size){char bp[1200];
+        snprintf(bp,sizeof bp,"%s/%s-distance.spv",bd,s->key);
+        FILE *bf=fopen(bp,"wb");if(bf){fwrite(bytes,1,size,bf);fclose(bf);
+          fprintf(stderr,"[nvn-vulkan] DISTANCE_DUMP %s bytes=%zu mask=%u\n",bp,size,distance_mask);}} }
     if(stage==0){
         const uint32_t *w=(const uint32_t *)bytes;uint32_t bound=w[3];if(!bound||bound>1000000)die("vertex input type bound",bound);
         uint8_t *kind=calloc(bound,1),*input=calloc(bound,1);uint32_t *location=malloc((size_t)bound*4);
@@ -2137,6 +2394,12 @@ static void shader_load_into(VShader *s,const char *key,uint32_t stage,int warm)
         unsigned ballots=0;uint8_t *adapted=dm_compute_ballot_apply(bytes,&size,&ballots);
         if(!adapted)die("compute ballot adaptation bounds/interface",0);bytes=adapted;
         if(ballots)fprintf(stderr,"[nvn-vulkan] COMPUTE_BALLOT_REDUCE shader=%s ballots=%u driver=Qualcomm bytes=%zu\n",key,ballots,size);
+        /* 诊断：把 ballot 改写后的模块落盘，便于离线 spirv-val 判断改写本身是否产生了非法 SPIR-V。
+         * Diagnostics: dump the post-ballot module so an offline spirv-val can decide whether the
+         * rewrite itself produced invalid SPIR-V. */
+        { const char *bd=adapted_shader_dir();
+          if(bd&&ballots){char bp[1200];snprintf(bp,sizeof bp,"%s/%s-ballot.spv",bd,key);
+            FILE *bf=fopen(bp,"wb");if(bf){fwrite(bytes,1,size,bf);fclose(bf);fprintf(stderr,"[nvn-vulkan] BALLOT_DUMP %s bytes=%zu\n",bp,size);}} }
     }
     if((stage==0||stage==1)&&nvn_vk_quirk_enabled(&G.quirks,NVN_VK_QUIRK_LOWER_SKIN_UBO)){
         unsigned accesses=0;uint64_t skip_bindings=0;for(unsigned i=0;i<s->h.nb;i++)if(s->b[i].kind==8&&s->b[i].binding<64)skip_bindings|=1ull<<s->b[i].binding;
@@ -2226,6 +2489,15 @@ static void shader_load_into(VShader *s,const char *key,uint32_t stage,int warm)
                 if(ob&&fread(ob,1,(size_t)on,of)==(size_t)on){free(bytes);bytes=ob;size=(size_t)on;fprintf(stderr,"[nvn-vulkan] SHADER_OVERRIDE shader=%s bytes=%ld\n",s->key,on);}else free(ob);
                 fclose(of);}}}
     VkShaderModuleCreateInfo mi={.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,.codeSize=size,.pCode=(uint32_t *)bytes};
+    /* 诊断：把即将交给 vkCreateShaderModule 的最终字节落盘。崩溃发生在该调用内部时，
+     * 没有这一步就永远拿不到「驱动实际看到的模块」。
+     * Diagnostics: dump the exact bytes handed to vkCreateShaderModule. When the driver faults
+     * inside that call, without this there is never a copy of the module the driver actually saw. */
+    { const char *fd=getenv("DM_FINAL_SHADER_DIR");
+      if(fd&&!warm){char fp[1200];
+        if(snprintf(fp,sizeof fp,"%s/%s-%u.spv",fd,s->key,stage)<(int)sizeof fp){
+          FILE *ff=fopen(fp,"wb");if(ff){fwrite(bytes,1,size,ff);fclose(ff);
+            fprintf(stderr,"[nvn-vulkan] FINAL_DUMP %s bytes=%zu\n",fp,size);}}} }
     CHECK(vkCreateShaderModule(G.device,&mi,NULL,&s->module));
     if(stage==0){
         if(!nvn_vk_vertex_inputs((uint32_t *)bytes,size/4,s->vertex_inputs))die("vertex input SPIR-V ABI",0);
@@ -2661,31 +2933,48 @@ static void binding_plan_remember(VShader *s,VkDescriptorSet set,const BindingRe
 static VkDescriptorSet binding_plan_try(VShader *s) {
     BindingPlan *plan=s->plan;
     if(!plan||G.disable_binding_plans||G.disable_desc_cache||G.trace_frame||!plan->eligible){G.profile_plan_fallbacks++;return VK_NULL_HANDLE;}
+    /* 结论（已实测推翻）：按槽位粒度失效让命中数从 34,680 涨到 48,840（+41%），
+     * 但 replay_inclusive_ms 反而从 643 涨到 931（+45%），帧率 37 → 31.6。
+     * 原因是逐 binding 的循环比对（每 draw 十几个槽位）比一次 4×u64 的比较贵得多，
+     * 省下的重建不足以抵消。保持原来的 stage 全局计数器口径——它更快。
+     * Rejected after measurement: per-slot invalidation raised hits from 34,680 to 48,840 (+41%)
+     * yet replay_inclusive_ms went from 643 to 931 (+45%) and fps fell 37 → 31.6. The per-binding
+     * loop (a dozen slots per draw) costs far more than one 4×u64 comparison, and the rebuilds
+     * saved do not pay for it. The stage-wide counter stays — it is faster. */
     if(!plan->resolved||plan->epoch!=S.epoch||plan->state_revision!=G.binding_revision[s->h.stage]||
-       plan->registry_revision!=G.registry_revision||plan->pool_revision!=G.pool_revision||!plan->set){G.profile_plan_misses++;return VK_NULL_HANDLE;}
+       plan->registry_revision!=G.registry_revision||plan->pool_revision!=G.pool_revision||!plan->set){
+        G.profile_plan_misses++;G.profile_plan_miss_epoch++;
+        if(!plan->resolved)G.profile_plan_miss_unresolved++;
+        else if(plan->epoch!=S.epoch)G.profile_plan_miss_epochgen++;
+        else if(plan->state_revision!=G.binding_revision[s->h.stage])G.profile_plan_miss_state++;
+        else if(plan->registry_revision!=G.registry_revision)G.profile_plan_miss_registry++;
+        else if(plan->pool_revision!=G.pool_revision)G.profile_plan_miss_pool++;
+        else G.profile_plan_miss_noset++;
+        return VK_NULL_HANDLE;
+    }
     for(uint32_t n=0;n<plan->nbuffer;n++){
         unsigned i=plan->buffers[n];const RBinding *b=&s->b[i];
         Range r=G.state.uniform[s->h.stage][b->slot];uint64_t offset=0;
-        if(!r.addr||!r.size){G.profile_plan_misses++;return VK_NULL_HANDLE;}
+        if(!r.addr||!r.size){G.profile_plan_misses++;G.profile_plan_miss_buf++;return VK_NULL_HANDLE;}
         VPool *pool=pool_read(r.addr,r.size,&offset);const BindingBuffer *cached=&plan->resources[i].buffer;
         if(offset%G.properties.limits.minUniformBufferOffsetAlignment||r.addr!=cached->range.addr||r.size!=cached->range.size||
-           pool->serial!=cached->pool_serial||offset!=cached->offset){G.profile_plan_misses++;return VK_NULL_HANDLE;}
+           pool->serial!=cached->pool_serial||offset!=cached->offset){G.profile_plan_misses++;G.profile_plan_miss_buf++;return VK_NULL_HANDLE;}
         G.profile_plan_buffers++;
     }
     for(uint32_t n=0;n<plan->nimage;n++){
         unsigned i=plan->images[n];const RBinding *b=&s->b[i];
         uint64_t handle=G.state.tex[s->h.stage][b->slot];unsigned tid=(unsigned)handle&0xfffff;
-        if(tid>=(unsigned)G.texture_pool_n||tid>=G.texture_slots||!G.tslot[tid].live){G.profile_plan_misses++;return VK_NULL_HANDLE;}
+        if(tid>=(unsigned)G.texture_pool_n||tid>=G.texture_slots||!G.tslot[tid].live){G.profile_plan_misses++;G.profile_plan_miss_img++;return VK_NULL_HANDLE;}
         TSlot *slot=&G.tslot[tid];VTexture *t=slot_texture(slot,1);const BindingImage *cached=&plan->resources[i].image;
         if(t->source.d.target!=NVN_TEXTURE_TARGET_2D||
            (slot->has_view&&(slot->view.set_levels||slot->view.set_layers||slot->view.set_format||slot->view.set_target||slot->view.set_swizzle||slot->view.depth_mode))||
            cached->descriptor_id!=tid||cached->texture.incarnation!=t->incarnation||cached->texture.slot!=(uint32_t)(t-G.textures)||
-           disjoint_sampling(t,slot,s->h.stage)){G.profile_plan_misses++;return VK_NULL_HANDLE;}
+           disjoint_sampling(t,slot,s->h.stage)){G.profile_plan_misses++;G.profile_plan_miss_tex++;return VK_NULL_HANDLE;}
         VkImageLayout layout=sampled_layout(t,s->h.stage);texture_transition(t,layout);
-        if(layout!=cached->layout||t->view==VK_NULL_HANDLE){G.profile_plan_misses++;return VK_NULL_HANDLE;}
+        if(layout!=cached->layout||t->view==VK_NULL_HANDLE){G.profile_plan_misses++;G.profile_plan_miss_layout++;return VK_NULL_HANDLE;}
         if(b->type==VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER){
             unsigned sid=(unsigned)((b->sampler>=0?G.state.samp[s->h.stage][b->sampler]:handle)>>20)&0xfff;
-            if(sid>=LIMIT_OBJECTS||!G.sslot[sid].live){if(!(s->fetch_bindings&(1ull<<i))||sid||!G.fetch_sampler){G.profile_plan_misses++;return VK_NULL_HANDLE;}}
+            if(sid>=LIMIT_OBJECTS||!G.sslot[sid].live){if(!(s->fetch_bindings&(1ull<<i))||sid||!G.fetch_sampler){G.profile_plan_misses++;G.profile_plan_miss_samp++;return VK_NULL_HANDLE;}}
         }
         G.profile_plan_images++;
     }
@@ -3067,6 +3356,76 @@ static VShader *program_stage(int stage) {
     VShader *s=program_stage_optional(stage);if(!s){
         const prog_t *p=G.state.programs[stage];fprintf(stderr,"[nvn-vulkan] PROGRAM_MISSING stage=%d program=%p serial=%llu count=%u\n",stage,(const void *)p,(unsigned long long)(p?p->serial:0),p?p->nstage:0);
         if(p)for(unsigned i=0;i<p->nstage&&i<6;i++){uint32_t actual=0xffffffff;if(p->sd[i].control)memcpy(&actual,(const uint8_t *)p->sd[i].control+0x714,4);fprintf(stderr,"[nvn-vulkan] PROGRAM_STAGE index=%u actual=%u control=%p data=%llx\n",i,actual,p->sd[i].control,(unsigned long long)p->sd[i].data);}
+        /* 诊断：把请求的 control 与索引里的条目逐一比对，判断是「索引里没有这个 control」
+         * 还是「有但匹配失败」。这决定了后续是补数据还是修状态机。
+         * Diagnostics: compare the requested control against every indexed entry to tell "the index
+         * lacks this control" from "it is present but did not match" — that decides whether the data
+         * or the program state machine needs work. */
+        if(p)for(unsigned i=0;i<p->nstage&&i<6;i++){
+            const uint8_t *ctl=(const uint8_t *)p->sd[i].control;
+            if(!ctl)continue;
+            uint32_t got_stage=0xffffffff;memcpy(&got_stage,ctl+0x714,4);
+            uint64_t want=control_hash(ctl,stage);
+            uint32_t magic=0;memcpy(&magic,ctl,4);
+            fprintf(stderr,"[nvn-vulkan] PROGRAM_PROBE index=%u slot_stage=%u control_magic=%#x hash=%#llx\n",
+                    i,got_stage,magic,(unsigned long long)want);
+            if(G.shader_index){
+                uint32_t count=((uint32_t *)G.shader_index)[2];size_t cursor=12;unsigned exact=0,near=0,best=0;
+                for(uint32_t e=0;e<count;e++){nvn_shader_index_record rec;
+                    if(!nvn_shader_index_read(G.shader_index,G.index_bytes,G.shader_index_version,&cursor,&rec))break;
+                    if(rec.stage!=(uint32_t)stage)continue;
+                    uint64_t h=control_hash(rec.control,rec.stage);
+                    if(rec.code_size)h=shader_code_hash(h,rec.code,rec.code_size);
+                    if(h==want)exact++;
+                    else {
+                        /* 差异字节数：若只差几个字节就是变体（可能游戏运行时改写），
+                         * 完全不同的字节数说明这个 control 来自索引之外。
+                         * Byte distance: a few differing bytes means a runtime-tweaked variant,
+                         * a large distance means the control is not from the index at all. */
+                        unsigned diff=0;
+                        for(unsigned i=0;i<0x880;i++)if(rec.control[i]!=ctl[i])diff++;
+                        if(diff<0x40)near++;
+                        if(!best||diff<best)best=diff;
+                    }}
+                fprintf(stderr,"[nvn-vulkan] PROGRAM_PROBE index_entries=%u same_stage_hash_match=%u near_variants=%u min_byte_diff=%u\n",count,exact,near,best);
+                /* 把最接近的那条的差异偏移打出来：若差异集中在少数固定偏移，那些字节就是游戏
+                 * 每次绑定都会改写的动态字段，说明应该按「忽略这些偏移」的规则匹配。
+                 * Print the differing offsets of the closest entry: if they cluster at a few fixed
+                 * positions, those bytes are the dynamic fields the game rewrites on every bind, and
+                 * matching should ignore them. */
+                { size_t cur2=12;unsigned bestdiff=0x881;const uint8_t *bestc=NULL;
+                  for(uint32_t e=0;e<count;e++){nvn_shader_index_record rec;
+                    if(!nvn_shader_index_read(G.shader_index,G.index_bytes,G.shader_index_version,&cur2,&rec))break;
+                    if(rec.stage!=(uint32_t)stage)continue;
+                    unsigned diff=0;for(unsigned i=0;i<0x880;i++)if(rec.control[i]!=ctl[i])diff++;
+                    if(diff<bestdiff){bestdiff=diff;bestc=rec.control;}}
+                  if(bestc){unsigned shown=0;
+                    for(unsigned i=0;i<0x880&&shown<40;i++)if(bestc[i]!=ctl[i]){
+                        fprintf(stderr,"[nvn-vulkan] PROBE_DIFF off=%#x index=%02x requested=%02x\n",i,bestc[i],ctl[i]);shown++;}
+                    fprintf(stderr,"[nvn-vulkan] PROBE_DIFF total=%u\n",bestdiff);}}
+            }else fprintf(stderr,"[nvn-vulkan] PROGRAM_PROBE index not loaded\n");
+        }
+        /* 诊断：把这个查不到的 control 与它对应的 code 落到 diagnostics/shaders/，用于离线分析
+         * （判断它是不是某个已知着色器的变体，以及 code 到底来自哪里）。
+         * Diagnostics: dump this unresolvable control together with its code into
+         * diagnostics/shaders/ for offline analysis of where the variant comes from. */
+        if(p)for(unsigned i=0;i<p->nstage&&i<6;i++){
+            const uint8_t *ctl=(const uint8_t *)p->sd[i].control;
+            if(!ctl)continue;
+            const char *dir=adapted_shader_dir();
+            if(!dir)continue;
+            char path[1200];snprintf(path,sizeof path,"%s/missing-%u-%llx.control",dir,i,(unsigned long long)control_hash(ctl,stage));
+            FILE *f=fopen(path,"wb");
+            if(f){fwrite(ctl,1,0x880,f);fclose(f);
+                fprintf(stderr,"[nvn-vulkan] PROBE_DUMP %s\n",path);}
+            uint32_t code_size=0;memcpy(&code_size,ctl+0x704,4);
+            if(code_size&&code_size<=16*1024*1024&&p->sd[i].data){
+                uint64_t off=0;VPool *pool=pool_find(p->sd[i].data,code_size,&off);
+                if(pool){
+                    snprintf(path,sizeof path,"%s/missing-%u-%llx.code",dir,i,(unsigned long long)control_hash(ctl,stage));
+                    f=fopen(path,"wb");
+                    if(f){fwrite(pool->guest+off,1,code_size,f);fclose(f);
+                        fprintf(stderr,"[nvn-vulkan] PROBE_DUMP_CODE %s bytes=%u\n",path,code_size);}}}}
         die("requested program stage missing",stage);
     }return s;
 }
@@ -3632,6 +3991,10 @@ static void dispatch(const p_dispatch *p) {
     for(unsigned axis=0;axis<3;axis++)if(groups[axis]>G.properties.limits.maxComputeWorkGroupCount[axis])die("dispatch device group limit",axis);
     if(memcmp(G.state.dispatch,groups,sizeof groups)){memcpy(G.state.dispatch,groups,sizeof groups);G.ssbo_revision[5]++;G.binding_revision[5]++;}
     VShader *s=program_stage(5);
+    /* 诊断/规避开关：DM_SKIP_CS=<16 位键> 跳过该计算着色器的派发（用于绕开驱动编译缺陷）。
+     * Diagnostic/workaround switch: DM_SKIP_CS=<16-hex key> skips dispatching that compute shader
+     * (used to sidestep a driver compiler defect). */
+    if(G.skip_cs[0]&&!strcmp(s->key,G.skip_cs)){static uint64_t skipped;if(skipped++<4)fprintf(stderr,"[nvn-vulkan] DIAG_SKIP_CS key=%s\n",s->key);return;}
     S.nimage_uses=0;collect_image_uses(s);prepare_comparison_images(s);
     VkDescriptorSet set=bind_shader(s);
     PsoKey key;memset(&key,0,sizeof(key));key.compute=1;key.shader[0]=s->identity;
@@ -4052,7 +4415,8 @@ static void execute(const uint8_t *p,unsigned depth) {
             int limit=h.op==OP_BIND_IMG?32:128;if(b->stage<0||b->stage>=6||b->first<0||b->n<0||b->n>32||b->first>limit||b->n>limit-b->first)die("texture/sampler binding range",b->n);
             payload_check(&h,offsetof(p_bind_handles,h)+(size_t)b->n*sizeof(uint64_t));
             uint64_t *dest=h.op==OP_BIND_TEX?G.state.tex[b->stage]:h.op==OP_BIND_SAMP?G.state.samp[b->stage]:G.state.img[b->stage];
-            size_t bytes=(size_t)b->n*sizeof(uint64_t);if(bytes&&memcmp(dest+b->first,b->h,bytes)){memcpy(dest+b->first,b->h,bytes);G.binding_revision[b->stage]++;G.texbind_revision[b->stage]++;}break;}
+            size_t bytes=(size_t)b->n*sizeof(uint64_t);
+            if(bytes&&memcmp(dest+b->first,b->h,bytes)){memcpy(dest+b->first,b->h,bytes);G.binding_revision[b->stage]++;G.texbind_revision[b->stage]++;}break;}
         case OP_DRAW:payload_check(&h,sizeof(p_draw));draw((const p_draw *)a,NULL,1,0);break;
         case OP_DRAW_IDX:payload_check(&h,sizeof(p_draw_idx));draw(NULL,(const p_draw_idx *)a,0,0);break;
         case OP_DRAW_INSTANCED:{payload_check(&h,sizeof(p_draw_instanced));const p_draw_instanced *d=(const void *)a;draw(&d->draw,NULL,d->instances,d->base_instance);break;}
@@ -4230,6 +4594,32 @@ static void swapchain_make(VkFormat source_format) {
         }
     }
     free(formats);if(!selected)die("Android scanout surface needs supported 8-bit nonlinear format",chosen.format);
+    /* present mode：上游固定用 FIFO（垂直同步），面板 120 Hz 时会把帧率锁在 120/N 档，
+     * 于是「渲染 17 ms」直接从 60 掉到 30，中间没有 45。这里允许用 MAILBOX / IMMEDIATE，
+     * 让帧率随渲染时间平滑变化。DM_PRESENT_MODE=mailbox|immediate|fifo 覆盖；缺省仍 FIFO。
+     * Present mode: upstream pins FIFO (vsync), which on a 120 Hz panel quantises the rate to
+     * 120/N — so a 17 ms frame drops straight from 60 to 30 with nothing in between. Allowing
+     * MAILBOX / IMMEDIATE makes the rate follow the render time instead.
+     * DM_PRESENT_MODE=mailbox|immediate|fifo overrides; FIFO stays the default. */
+    { uint32_t mode_count=0;
+      if(vkGetPhysicalDeviceSurfacePresentModesKHR(G.physical,G.surface,&mode_count,NULL)==VK_SUCCESS&&mode_count){
+        VkPresentModeKHR *modes=malloc((size_t)mode_count*sizeof *modes);
+        if(modes&&vkGetPhysicalDeviceSurfacePresentModesKHR(G.physical,G.surface,&mode_count,modes)==VK_SUCCESS){
+          const char *want=getenv("DM_PRESENT_MODE");
+          VkPresentModeKHR pick=VK_PRESENT_MODE_FIFO_KHR;
+          int has_immediate=0,has_mailbox=0;
+          for(uint32_t k=0;k<mode_count;k++){
+            if(modes[k]==VK_PRESENT_MODE_IMMEDIATE_KHR)has_immediate=1;
+            if(modes[k]==VK_PRESENT_MODE_MAILBOX_KHR)has_mailbox=1;
+          }
+          if(want&&!strcmp(want,"immediate")&&has_immediate)pick=VK_PRESENT_MODE_IMMEDIATE_KHR;
+          else if(want&&!strcmp(want,"mailbox")&&has_mailbox)pick=VK_PRESENT_MODE_MAILBOX_KHR;
+          fprintf(stderr,"[nvn-vulkan] PRESENT_MODES count=%u immediate=%d mailbox=%d pick=%d\n",
+                  mode_count,has_immediate,has_mailbox,(int)pick);
+          G.present_mode=pick;
+        }
+        free(modes);
+      } }
     fprintf(stderr,"[nvn-vulkan] PRESENT_ENCODING source_format=%u swap_format=%u colorspace=%u bridge=%d\n",source_format,chosen.format,chosen.colorSpace,present_srgb(source_format)!=present_srgb(chosen.format));
     G.swap_format=chosen.format;G.swap_extent=caps.currentExtent;
     if(G.swap_extent.width==UINT32_MAX)G.swap_extent=(VkExtent2D){(uint32_t)ANativeWindow_getWidth(G.window),(uint32_t)ANativeWindow_getHeight(G.window)};
@@ -4239,7 +4629,7 @@ static void swapchain_make(VkFormat source_format) {
     VkSwapchainCreateInfoKHR i={.sType=VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,.surface=G.surface,.minImageCount=count,
       .imageFormat=chosen.format,.imageColorSpace=chosen.colorSpace,.imageExtent=G.swap_extent,.imageArrayLayers=1,
       .imageUsage=VK_IMAGE_USAGE_TRANSFER_DST_BIT,.imageSharingMode=VK_SHARING_MODE_EXCLUSIVE,.preTransform=caps.supportedTransforms&VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR?VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR:caps.currentTransform,
-      .compositeAlpha=alpha,.presentMode=VK_PRESENT_MODE_FIFO_KHR,.clipped=VK_TRUE};CHECK(vkCreateSwapchainKHR(G.device,&i,NULL,&G.swapchain));
+      .compositeAlpha=alpha,.presentMode=G.present_mode?G.present_mode:VK_PRESENT_MODE_FIFO_KHR,.clipped=VK_TRUE};CHECK(vkCreateSwapchainKHR(G.device,&i,NULL,&G.swapchain));
     CHECK(vkGetSwapchainImagesKHR(G.device,G.swapchain,&G.nswap,NULL));if(!G.nswap)die("swapchain has no images",0);
     free(G.swap_images);free(G.swap_layouts);
     G.swap_images=calloc(G.nswap,sizeof(*G.swap_images));G.swap_layouts=calloc(G.nswap,sizeof(*G.swap_layouts));
@@ -4380,6 +4770,22 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
         G.profile_t2t_copies=G.profile_t2t_scaled=G.profile_t2t_texels=0;
         fprintf(stderr,"[nvn-vulkan] RENDER_SUBMIT_CLASS_PROFILE frame=%llu total_submits=%llu observed_eligible_candidates=%llu candidate_fence_wait_ms=%.3f pool_writeback_bytes=%llu events=%llu counter_reports=%llu write_submits=%llu event_submits=%llu report_submits=%llu trace_submits=%llu cpu_readback_submits=%llu event_wait_submits=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_submits,(unsigned long long)G.profile_submit_candidates,G.profile_candidate_wait_ns/1e6,(unsigned long long)G.profile_writeback_bytes,(unsigned long long)G.profile_events,(unsigned long long)G.profile_reports,(unsigned long long)G.profile_write_submits,(unsigned long long)G.profile_event_submits,(unsigned long long)G.profile_report_submits,(unsigned long long)G.profile_trace_submits,(unsigned long long)G.profile_cpu_readback_submits,(unsigned long long)G.profile_event_wait_submits);
         fprintf(stderr,"[nvn-vulkan] RENDER_CPU_PROFILE frame=%llu lookup_ms=%.3f pool_ms=%.3f bind_ms=%.3f renderpass_ms=%.3f present_ms=%.3f desc_alloc_ms=%.3f desc_update_ms=%.3f prep_ms=%.3f\n",(unsigned long long)G.present_count+1,G.profile_lookup_ns/1e6,G.profile_pool_ns/1e6,G.profile_bind_ns/1e6,G.profile_render_ns/1e6,G.profile_present_ns/1e6,G.profile_desc_alloc_ns/1e6,G.profile_desc_update_ns/1e6,G.profile_prep_ns/1e6);
+        /* pool_read 内部拆开：dirty 查询 vs mprotect 保护（后者是系统调用，通常是真凶）。 */
+        fprintf(stderr,"[nvn-vulkan] RENDER_POOL_PROFILE frame=%llu dirty_calls=%llu dirty_query_ms=%.3f dirty_protect_ms=%.3f\n",
+            (unsigned long long)G.present_count+1,(unsigned long long)G.profile_dirty_calls,
+            G.profile_dirty_query_ns/1e6,G.profile_dirty_protect_ns/1e6);
+        G.profile_dirty_query_ns=G.profile_dirty_protect_ns=0;G.profile_dirty_calls=0;
+        fprintf(stderr,"[nvn-vulkan] RENDER_SPAN_PROFILE frame=%llu copies=%llu copy_ms=%.3f scan_units=%llu\n",
+            (unsigned long long)G.present_count+1,(unsigned long long)G.profile_span_copies,
+            G.profile_span_copy_ns/1e6,(unsigned long long)G.profile_span_complexity);
+        G.profile_span_copy_ns=G.profile_span_copies=G.profile_span_complexity=0;
+        fprintf(stderr,"[nvn-vulkan] RENDER_USEMARK_PROFILE frame=%llu usemark_ms=%.3f\n",
+            (unsigned long long)G.present_count+1,G.profile_usemark_ns/1e6);
+        G.profile_usemark_ns=0;
+        fprintf(stderr,"[nvn-vulkan] RENDER_NWRITES_PROFILE frame=%llu peak=%llu conflict_checks=%llu\n",
+            (unsigned long long)G.present_count+1,(unsigned long long)G.profile_nwrites_peak,
+            (unsigned long long)G.profile_conflict_checks);
+        G.profile_nwrites_peak=0;G.profile_conflict_checks=0;
         fprintf(stderr,"[nvn-vulkan] RENDER_WRITEBACK_PROFILE frame=%llu enabled=%u raw_ranges=%llu copied_ranges=%llu raw_bytes=%llu copied_bytes=%llu plan_thread_cpu_ms=%.3f\n",(unsigned long long)G.present_count+1,G.enable_writeback_coalesce,(unsigned long long)G.profile_writeback_raw_ranges,(unsigned long long)G.profile_writeback_copy_ranges,(unsigned long long)G.profile_writeback_raw_bytes,(unsigned long long)G.profile_writeback_bytes,G.profile_writeback_plan_cpu_ns/1e6);
         fprintf(stderr,"[nvn-vulkan] RENDER_PSO_PROFILE frame=%llu cached=%u hits=%llu misses=%llu\n",(unsigned long long)G.present_count+1,G.npso,(unsigned long long)G.profile_pso_hits,(unsigned long long)G.profile_pso_misses);
         if(G.profile_frames>=60)fprintf(stderr,"[nvn-vulkan] RENDER_PSO_HASH_PROFILE frame=%llu frames=%llu key_bytes=%zu hash_mode=word4_mix last_cache=%d lookups=%llu hash_calls=%llu hash_ms=%.3f lookup_ms=%.3f last_hits=%llu last_misses=%llu table_hits=%llu misses=%llu table_probes=%llu max_probe=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_frames,sizeof(PsoKey),G.enable_pso_last,(unsigned long long)G.profile_pso_lookups,(unsigned long long)G.profile_pso_hash_calls,G.profile_pso_hash_ns/1e6,G.profile_pso_lookup_ns/1e6,(unsigned long long)G.profile_pso_last_hits,(unsigned long long)G.profile_pso_last_misses,(unsigned long long)G.profile_pso_table_hits,(unsigned long long)G.profile_pso_misses,(unsigned long long)G.profile_pso_probes,(unsigned long long)G.profile_pso_max_probe);
@@ -4412,6 +4818,31 @@ uint64_t mtl_present(const tex_t *source,double period,const int crop[4]) {
         G.profile_desc_hits=G.profile_desc_misses=G.profile_control_hits=G.profile_control_misses=G.profile_barriers_skipped=G.profile_sample_copy_hits=G.profile_sample_copy_misses=0;
         fprintf(stderr,"[nvn-vulkan] RENDER_BINDING_PLAN_PROFILE frame=%llu hits=%llu misses=%llu fallbacks=%llu prepared_buffers=%llu prepared_images=%llu enabled=%u\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_plan_hits,(unsigned long long)G.profile_plan_misses,(unsigned long long)G.profile_plan_fallbacks,(unsigned long long)G.profile_plan_buffers,(unsigned long long)G.profile_plan_images,!G.disable_binding_plans);
         G.profile_plan_hits=G.profile_plan_misses=G.profile_plan_fallbacks=G.profile_plan_buffers=G.profile_plan_images=0;
+        /* miss 成因分类：判断哪一项值得优化（epoch = 状态代数变了；buf = uniform 地址变了；
+         * tex = 纹理状态变了；layout = 图像布局对不上；img = 纹理槽失效；samp = sampler 不可用）。
+         * Miss causes: which one is worth optimizing (epoch = state generation changed; buf = the
+         * uniform address changed; tex = texture state changed; layout = image layout mismatched;
+         * img = texture slot dead; samp = sampler unavailable). */
+        if(G.profile_plan_miss_epoch||G.profile_plan_miss_buf||G.profile_plan_miss_tex||
+           G.profile_plan_miss_layout||G.profile_plan_miss_img||G.profile_plan_miss_samp){
+            fprintf(stderr,"[nvn-vulkan] RENDER_PLAN_MISS_PROFILE frame=%llu epoch=%llu buf=%llu tex=%llu layout=%llu img=%llu samp=%llu\n",
+                (unsigned long long)G.present_count+1,
+                (unsigned long long)G.profile_plan_miss_epoch,(unsigned long long)G.profile_plan_miss_buf,
+                (unsigned long long)G.profile_plan_miss_tex,(unsigned long long)G.profile_plan_miss_layout,
+                (unsigned long long)G.profile_plan_miss_img,(unsigned long long)G.profile_plan_miss_samp);
+            G.profile_plan_miss_epoch=G.profile_plan_miss_buf=G.profile_plan_miss_tex=0;
+            G.profile_plan_miss_layout=G.profile_plan_miss_img=G.profile_plan_miss_samp=0;
+        }
+        if(G.profile_plan_miss_unresolved||G.profile_plan_miss_epochgen||G.profile_plan_miss_state||
+           G.profile_plan_miss_registry||G.profile_plan_miss_pool||G.profile_plan_miss_noset){
+            fprintf(stderr,"[nvn-vulkan] RENDER_PLAN_EPOCH_PROFILE frame=%llu unresolved=%llu epoch_gen=%llu state=%llu registry=%llu pool=%llu no_set=%llu\n",
+                (unsigned long long)G.present_count+1,
+                (unsigned long long)G.profile_plan_miss_unresolved,(unsigned long long)G.profile_plan_miss_epochgen,
+                (unsigned long long)G.profile_plan_miss_state,(unsigned long long)G.profile_plan_miss_registry,
+                (unsigned long long)G.profile_plan_miss_pool,(unsigned long long)G.profile_plan_miss_noset);
+            G.profile_plan_miss_unresolved=G.profile_plan_miss_epochgen=G.profile_plan_miss_state=0;
+            G.profile_plan_miss_registry=G.profile_plan_miss_pool=G.profile_plan_miss_noset=0;
+        }
         fprintf(stderr,"[nvn-vulkan] RENDER_RESOURCE_CACHE_PROFILE frame=%llu enabled=%d sequence=%llu views_created=%llu framebuffers_created=%llu framebuffer_hits=%llu flushes=%llu kept_submissions=%llu retained_passes=%d retained_views=%d\n",(unsigned long long)G.present_count+1,atomic_load(&resource_applied),(unsigned long long)resource_control_sequence,(unsigned long long)G.resource_views,(unsigned long long)G.resource_passes,(unsigned long long)G.resource_hits,(unsigned long long)G.resource_flushes,(unsigned long long)G.resource_kept,G.submission_slot.npass+G.submission_slot2.npass,G.submission_slot.nview+G.submission_slot2.nview);
         fprintf(stderr,"[nvn-vulkan] RENDER_IMAGE_USAGE_PROFILE frame=%llu declared_policy=%d diagnostic=%d storage_images=%llu omitted_storage=%llu promotions=%llu retained_old_images=%llu\n",(unsigned long long)G.present_count+1,G.image_usage_by_flags,G.diag_img_usage,(unsigned long long)G.image_usage_storage,(unsigned long long)G.image_usage_omitted,(unsigned long long)G.image_promotions,(unsigned long long)G.image_retired_live);
         fprintf(stderr,"[nvn-vulkan] RENDER_VIEW_CACHE_PROFILE frame=%llu view_hits=%llu view_misses=%llu framebuffer_hits=%llu framebuffer_misses=%llu\n",(unsigned long long)G.present_count+1,(unsigned long long)G.profile_view_hits,(unsigned long long)G.profile_view_misses,(unsigned long long)G.profile_framebuffer_hits,(unsigned long long)G.profile_framebuffer_misses);

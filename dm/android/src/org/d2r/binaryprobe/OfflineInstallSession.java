@@ -60,10 +60,38 @@ final class OfflineInstallSession {
         return result;
     }
     private void loadManifest()throws Exception {manifest=readManifest(context);}
+    /* 没有离线清单时，用「关键文件是否已就位」判定是否已有安装。清单
+     * （assets/offline-manifest.json）属于官方 .d2rpack 发行链路，自行打包的 APK 里没有；
+     * 而 OfflinePackageInstaller 的 prepareExisting / receiptMatches 都要读 manifest 字段，
+     * 传 null 会 NPE，所以这里单独按文件存在性判断。
+     * Without the offline manifest, decide by whether the key files are already in place. The
+     * manifest (assets/offline-manifest.json) belongs to the official .d2rpack release chain and is
+     * absent from a self-built APK, while OfflinePackageInstaller.prepareExisting / receiptMatches
+     * both read the manifest field, so passing null would NPE — hence a plain file check here. */
+    private boolean gameFilesPresent() {
+        try {
+            File files=context.getFilesDir();
+            File romfs=new File(files,"game.romfs");
+            File shaders=new File(files,"d2r-mobile/shaders/shader_index.bin");
+            return romfs.isFile()&&romfs.length()>0L&&shaders.isFile()&&shaders.length()>0L;
+        }catch(Exception e){return false;}
+    }
     private void prepare() {
         try {
-            loadManifest();OfflinePackageInstaller installer=installer();
+            /* 先看已有安装，再读清单。清单读失败不应挡住「游戏文件其实已经就位」这条路——
+             * 原先先 loadManifest() 会在这一步抛异常，prepareExisting() 根本执行不到，
+             * 界面永远停在「APK 缺少有效的安装清单」，进不了游戏。
+             * Check for an existing install before reading the manifest. A manifest read failure must
+             * not block the "game files are already in place" path: the old order called
+             * loadManifest() first, which threw and prevented prepareExisting() from running, so the
+             * screen stayed on "APK has no valid install manifest" and the game never started. */
+            try { loadManifest(); } catch(Exception manifestError) {
+                if (gameFilesPresent()) { finishReady(); return; }
+                throw manifestError;
+            }
+            OfflinePackageInstaller installer=installer();
             if(installer.prepareExisting()){finishReady();return;}
+            if(gameFilesPresent()){finishReady();return;}
             String text=installer.hasInterruptedImport()?"上次导入未完成。请重新选择完整资源包；已校验的文件会复用。":"请先把配套的离线资源包下载到手机，无需解压。";
             idle("准备离线游戏",text);
         }catch(Exception e){error(e);}
