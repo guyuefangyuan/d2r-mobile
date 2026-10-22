@@ -133,3 +133,17 @@ SoC / driver combinations are unverified.
   picture).
 - The overlay control scale (`0.62` floor) is an empirical value; no systematic accessibility
   testing was done.
+
+## 10. Two things this merge taught us
+
+- **The touch-UI overlay has to be regenerated whenever the tree changes.** The overlay
+  (`ctrl_touch`, `touch_strings.tsv`, `data/.build.config`, `data/00-00000007.data`) is built
+  from `dm/ios/tools/gen_romfs_overlay.py` plus `touch_layout.py`, `ui_text.tsv` and the
+  `dm_custom.c` key order. Merging upstream changed all three, so the old overlay no longer
+  matched the shell: menus were laid out for the previous build and touch targets landed in the
+  wrong place. Regenerate it from the merged tree before shipping.
+- **An explicit Turnip choice on a SoC Turnip cannot drive is corrected to the system driver.**
+  Turnip only drives Adreno; on Mali `vkEnumeratePhysicalDevices` returns zero devices and the
+  host aborts during backend init (`STOP Vulkan physical device (0)`), which looks like a crash
+  on launch. Measured on a vivo Dimensity 9400 where a saved `selection=turnip` made the game
+  die before the first frame and left the character-creation screen with a single class.

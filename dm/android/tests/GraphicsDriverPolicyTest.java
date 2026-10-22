@@ -40,6 +40,14 @@ public final class GraphicsDriverPolicyTest {
             throw new AssertionError("Other models keep the old automatic choice");
         if(!GraphicsDriverPolicy.turnipPresentBug("SM8750")||GraphicsDriverPolicy.turnipPresentBug("SM7325")||GraphicsDriverPolicy.turnipPresentBug(null))
             throw new AssertionError("Present-bug list");
-        System.out.println("ANDROID_GRAPHICS_DRIVER qualcomm_default=1 explicit_choices=1 api_guard=1 verified_list=1 present_bug_soc=1 passed=1");
+        // A saved Turnip choice on a SoC Turnip cannot drive is corrected to the system driver (API 31+ only):
+        // Turnip enumerates zero physical devices on Mali and the host dies during backend init.
+        for(String maker:new String[]{"MediaTek","Samsung","HiSilicon"})
+            if(GraphicsDriverPolicy.useBundledTurnip(GraphicsDriverPolicy.TURNIP,34,maker))
+                throw new AssertionError("Turnip must be rejected on a non-Qualcomm SoC: "+maker);
+        if(!GraphicsDriverPolicy.useBundledTurnip(GraphicsDriverPolicy.TURNIP,34,"QTI")||
+           !GraphicsDriverPolicy.useBundledTurnip(GraphicsDriverPolicy.TURNIP,30,"MediaTek"))
+            throw new AssertionError("Explicit Turnip must survive on Qualcomm, and the guard needs API 31");
+        System.out.println("ANDROID_GRAPHICS_DRIVER qualcomm_default=1 explicit_choices=1 api_guard=1 verified_list=1 present_bug_soc=1 turnip_soc_guard=1 passed=1");
     }
 }

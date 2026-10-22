@@ -37,7 +37,17 @@ final class GraphicsDriverPolicy {
     /** socModel may be null when unknown (before API 31); only the automatic choice consults it. */
     static boolean useBundledTurnip(String mode,int sdk,String socManufacturer,String socModel){
         String m=normalize(mode);
-        if(TURNIP.equals(m))return true;
+        if(TURNIP.equals(m)){
+            /* 明确选了 Turnip 也要看 SoC：Turnip 只能驱动 Adreno，装在联发科/三星等设备上
+             * vkEnumeratePhysicalDevices 会返回 0 个设备，宿主随即 die（实测 vivo 天玑 9400：
+             * STOP Vulkan physical device (0)），表现就是启动闪退。这种选择不可能成立，按系统驱动走。
+             * An explicit Turnip choice still has to respect the SoC: Turnip only drives Adreno, and on a
+             * MediaTek/Samsung device vkEnumeratePhysicalDevices returns zero devices and the host dies
+             * (measured on a vivo Dimensity 9400: "STOP Vulkan physical device (0)"), which looks like a
+             * crash on launch. Such a choice can never work, so follow the system driver instead. */
+            if(sdk>=31&&socManufacturer!=null&&!QUALCOMM.equals(socManufacturer))return false;
+            return true;
+        }
         if(SYSTEM.equals(m))return false;
         return useBundledTurnip(sdk,socManufacturer)&&!turnipPresentBug(socModel);
     }

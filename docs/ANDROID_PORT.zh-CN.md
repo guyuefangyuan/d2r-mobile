@@ -121,3 +121,15 @@ overlayScale = Math.max(0.62f, Math.min(1f, picture[0] / metrics.density / 1280f
 - **Mali 50 fps 以上需要绘制批处理**，而 D2R 的绘制顺序约束很紧，风险高，暂缓。
 - **BC 纹理始终 CPU 解码**，`DM_BC_NATIVE` 缺省关闭（打开会花屏）。
 - 触屏覆盖层控件的尺寸刻度（0.62 下限）是经验值，没有做系统性的可达性测试。
+
+## 10. 这次合并踩到的两件事
+
+- **树一变，触屏 UI 覆盖层就必须重新生成。** 覆盖层（`ctrl_touch`、`touch_strings.tsv`、
+  `data/.build.config`、`data/00-00000007.data`）由 `dm/ios/tools/gen_romfs_overlay.py` 配合
+  `touch_layout.py`、`ui_text.tsv` 和 `dm_custom.c` 的键序生成。合并上游把这三样都改了，
+  旧覆盖层就和新的界面层对不上：菜单按上一版的布局摆、触控目标落在错位置。
+  出包前必须用合并后的树重新生成。
+- **在 Turnip 驱动不了的 SoC 上，显式选 Turnip 会被改回系统驱动。** Turnip 只能驱动 Adreno；
+  在 Mali 上 `vkEnumeratePhysicalDevices` 返回 0 个设备，宿主在 backend 初始化时直接 abort
+  （`STOP Vulkan physical device (0)`），表现就是启动闪退。实测 vivo 天玑 9400：存档里
+  `selection=turnip` 时一帧都没出就死，建角页只剩一个职业。
