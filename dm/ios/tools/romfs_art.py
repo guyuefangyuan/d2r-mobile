@@ -29,9 +29,17 @@ def lib():
     global _lib
     if _lib is None:
         p = os.path.join(tempfile.mkdtemp(), 'deswizzle.dll' if os.name == 'nt' else 'deswizzle.dylib')
-        # Windows 上动态库的函数要点名导出才找得到（实测：不带这三项能编能加载，但取不到函数）
-        # On Windows a dynamic library's functions must be exported by name to be found (measured: without these three options it compiles and loads, but the functions cannot be fetched)
-        win = ['-Wl,/EXPORT:nvn_tex_layout', '-Wl,/EXPORT:nvn_deswizzle', '-Wl,/EXPORT:nvn_swizzle'] if os.name == 'nt' else ['-fPIC']
+        # Windows 上动态库的函数要点名导出才找得到（实测：不带这三项能编能加载，但取不到函数）。
+        # /EXPORT: 是 MSVC 链接器的写法；这里实际用的是 mingw 的 ld（clang 只是壳），它把
+        # /EXPORT:name 当成输入文件而报 "cannot find /EXPORT:..."。mingw 的等价做法是
+        # --export-all-symbols（这层 DLL 只给本脚本用，全导出没有副作用）。
+        # On Windows a dynamic library's functions must be exported by name to be found (measured:
+        # without these options it compiles and loads, but the functions cannot be fetched).
+        # /EXPORT: is MSVC linker syntax; the linker here is mingw's ld (clang is only a wrapper) and
+        # it treats /EXPORT:name as an input file, failing with "cannot find /EXPORT:...". The mingw
+        # equivalent is --export-all-symbols (this helper DLL is private to the script, so exporting
+        # everything is harmless).
+        win = ['-Wl,--export-all-symbols'] if os.name == 'nt' else ['-fPIC']
         subprocess.run(['clang', '-O2', '-shared', *win, '-I' + os.path.join(DM, 'gfx', 'nvn'), '-I' + os.path.join(DM, 'gfx', 'tex'), '-o', p,
                         os.path.join(DM, 'gfx', 'tex', 'nvn_deswizzle.c'), os.path.join(DM, 'gfx', 'nvn', 'nvn_tex.c')], check=True)
         L = C.CDLL(p); L.nvn_tex_layout.argtypes = [C.POINTER(Desc), C.POINTER(Layout)]

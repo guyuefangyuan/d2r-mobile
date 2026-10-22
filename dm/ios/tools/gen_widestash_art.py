@@ -33,7 +33,10 @@ class Layout(C.Structure): _fields_ = [('size', C.c_uint64), ('layer_size', C.c_
 
 def lib():
     t = tempfile.mkdtemp(); p = os.path.join(t, 'bl.dll' if os.name == 'nt' else 'bl.dylib')
-    win = ['-Wl,/EXPORT:nvn_tex_layout', '-Wl,/EXPORT:nvn_deswizzle', '-Wl,/EXPORT:nvn_swizzle'] if os.name == 'nt' else ['-fPIC']   # 同 romfs_art.py | same as romfs_art.py
+    # 同 romfs_art.py：Windows 上用 mingw 的 --export-all-symbols，MSVC 的 /EXPORT: 会被 ld 当成输入文件。
+    # Same as romfs_art.py: on Windows use mingw's --export-all-symbols; MSVC's /EXPORT: is treated as
+    # an input file by ld.
+    win = ['-Wl,--export-all-symbols'] if os.name == 'nt' else ['-fPIC']
     subprocess.run(['clang', '-O2', '-shared', *win, '-I' + os.path.join(DM, 'gfx', 'nvn'), '-I' + os.path.join(DM, 'gfx', 'tex'), '-o', p,
                     os.path.join(DM, 'gfx', 'tex', 'nvn_deswizzle.c'), os.path.join(DM, 'gfx', 'nvn', 'nvn_tex.c')], check=True)
     L = C.CDLL(p); L.nvn_tex_layout.argtypes = [C.POINTER(Desc), C.POINTER(Layout)]

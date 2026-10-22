@@ -81,6 +81,18 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private int[] addOnIndices=new int[0];
     private boolean touchMode=true;
     private boolean inGame;
+    /* 屏幕上的菜单操控按钮（触摸操控 / 方向键 / 确认 / 返回 / 开始）。上游最新版把这一整套删掉了，
+     * 但 D2R 的主机版列表（传送点、角色列表、商店……）只吃手柄输入、不认触点，删掉之后触屏在
+     * 这些页面上完全没法操作。这里按上游仍然保留的接线（nativeActions / actionButtons /
+     * setTouchMode）把它们加回来，并且只做加法：不改上游的任何原有逻辑。
+     * The on-screen menu-control buttons (touch-mode toggle / D-pad / confirm / back / start).
+     * Upstream's latest deleted the whole set, but D2R's console lists (waypoint, character list,
+     * shop...) only take gamepad input and ignore touches, so without them touch cannot operate those
+     * pages at all. They are added back here on top of the wiring upstream still has (nativeActions /
+     * actionButtons / setTouchMode) and only add code: none of upstream's own logic is changed. */
+    private final java.util.List<View> menuControls=new java.util.ArrayList<>();
+    private TextView modeControl;
+    private float overlayScale=1f;
     private int width,height;
     private long actionButtons;
     private long controllerButtons;
@@ -133,12 +145,22 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY|View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN|View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
         FrameLayout root=new FrameLayout(this);root.setBackgroundColor(0xff0d0d0f);
+        /* 覆盖层按钮按「画面」而不是「绝对 dp」缩放：16:9 画面在平板上约 1280dp 宽、在手机上只有
+         * 617dp，同一份绝对尺寸在手机上相对画面大一倍，会盖住游戏自己的按钮。下限 0.62 保住手指
+         * 能按的面积。平板算出 1.0，行为与不加这段完全一致。
+         * Scale the overlay buttons by the picture instead of by absolute dp: the 16:9 picture is about
+         * 1280dp wide on the tablet and only 617dp on the phone, so the same absolute size is twice as
+         * large relative to the picture there and covers the game's own buttons. The 0.62 floor keeps
+         * the touch target finger-sized; the tablet evaluates to 1.0, i.e. unchanged. */
+        { android.util.DisplayMetrics metrics=getResources().getDisplayMetrics();
+          int[] picture=GameDisplayMetrics.fitGame(metrics.widthPixels,metrics.heightPixels);
+          overlayScale=Math.max(0.62f,Math.min(1f,picture[0]/metrics.density/1280f)); }
         GameViewport viewport=new GameViewport(this);
         root.addView(viewport,new FrameLayout.LayoutParams(-1,-1,Gravity.CENTER));
         game=new SurfaceView(this);game.setContentDescription(t("游戏画面"));game.getHolder().addCallback(this);
         game.setOnTouchListener((view,event) -> {
             if(!configured||!surfaceReady||!inputReady||width<=0||height<=0)return true;
-            if(!touchMode) setTouchMode(true);
+            if(!touchMode && !inGame) setTouchMode(true);
             // The SurfaceView owns this contact after DOWN even when the
             // overlay becomes visible. Forward the whole first gesture too.
             if(touchControls!=null&&inGame&&touchControls.onTouchEvent(event))return true;
@@ -156,11 +178,38 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         });
         viewport.addView(game,new FrameLayout.LayoutParams(-1,-1));
         touchControls=new TouchControlsView(this,() -> inputReady&&resumed&&!failed,strings);
+        /* 只在「触摸操控」模式下让触摸层接管触点：它覆盖全屏，若在「菜单操控」下也接管，
+         * 方向键/确认/返回按钮就点不动。上游这里是「进局即接管并强制切回触摸操控」。
+         * Let the touch layer claim contacts only in touch-control mode: it covers the whole picture,
+         * so claiming them in menu-control mode makes the D-pad / confirm / back buttons unreachable.
+         * Upstream claims them (and forces touch mode back) as soon as a run starts. */
         touchControls.setTouchActivation(() -> {
-            if(inGame&&gameInputReady()){setTouchMode(true);return true;}
+            if(!touchMode) return false;
+            if(inGame&&gameInputReady())return true;
             return false;
         });
         viewport.addView(touchControls,new FrameLayout.LayoutParams(-1,-1));
+        /* 菜单操控用的屏幕按钮。方向键 + 确认/返回 + 开始(=✚/Plus)：主机版列表只认手柄，
+         * 没有这几个按钮，触屏在传送点、角色列表这些页面里一步都走不了。
+         * On-screen buttons for menu-control mode. D-pad plus confirm/back plus start (=the Plus
+         * key): the console lists only accept gamepad input, so without these buttons touch cannot
+         * move through the waypoint list, the character list or the shop at all. */
+        addAction(viewport,"确认",1,Gravity.RIGHT|Gravity.BOTTOM,18,18);
+        addAction(viewport,"返回",2,Gravity.RIGHT|Gravity.BOTTOM,104,18);
+        addAction(viewport,"开始",1L<<10,Gravity.RIGHT|Gravity.TOP,18,18);
+        addAction(viewport,"↑",1L<<13,Gravity.LEFT|Gravity.BOTTOM,92,92);
+        addAction(viewport,"↓",1L<<15,Gravity.LEFT|Gravity.BOTTOM,92,18);
+        addAction(viewport,"←",1L<<12,Gravity.LEFT|Gravity.BOTTOM,18,55);
+        addAction(viewport,"→",1L<<14,Gravity.LEFT|Gravity.BOTTOM,166,55);
+        TextView mode=new TextView(this);modeControl=mode;mode.setText(strings.modeLabel(touchMode));
+        mode.setTextColor(0xffe9d9ba);mode.setTextSize(16f*overlayScale);mode.setGravity(Gravity.CENTER);
+        mode.setBackgroundColor(0x8030241b);mode.setContentDescription(strings.modeDescription(touchMode));
+        mode.setClickable(true);mode.setFocusable(true);
+        mode.setOnClickListener(v -> setTouchMode(!touchMode));
+        FrameLayout.LayoutParams modeParams=new FrameLayout.LayoutParams(overlayPx(100),overlayPx(48),Gravity.LEFT|Gravity.TOP);
+        modeParams.leftMargin=overlayPx(18);modeParams.topMargin=overlayPx(18);
+        viewport.addView(mode,modeParams);
+        updateMenuControls();
         fps=new TextView(this);fps.setText("FPS —");fps.setTextColor(TouchControlsView.TEXT);
         fps.setTextSize(12);fps.setTypeface(Typeface.MONOSPACE);fps.setGravity(Gravity.CENTER);
         fps.setMinWidth(dp(84));fps.setPadding(dp(8),dp(4),dp(8),dp(4));fps.setBackgroundColor(TouchControlsView.INK);
@@ -201,12 +250,52 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private void cancelFrontendTouch(){frontendGesture=false;frontendPointer=-1;nativeFrontendTouch(3,0,0);}
     private void refreshFrontendStrings(){
         game.setContentDescription(t("游戏画面"));
+        refreshModeLabel();
     }
     private int dp(int value){return Math.round(value*getResources().getDisplayMetrics().density);}
+    /* 覆盖层按钮专用换算：额外乘 overlayScale，让窄 dp 的手机上这些按钮与画面保持同一比例。
+     * 整屏的加载文字仍用 dp()。
+     * Overlay-only conversion: multiplies by overlayScale so those buttons keep the same proportion
+     * to the picture on a narrow-dp phone. Full-screen loading text still uses dp(). */
+    private int overlayPx(int value){return Math.round(value*getResources().getDisplayMetrics().density*overlayScale);}
+    /* 一个屏幕按钮 = 按住时置位 actionButtons 里的一个手柄位，抬起清掉。与上游 nativeActions 接线相同。
+     * One on-screen button sets one gamepad bit in actionButtons while held and clears it on release,
+     * through the same nativeActions wiring upstream keeps. */
+    private void addAction(FrameLayout parent,String label,long mask,int gravity,int horizontal,int vertical){
+        TextView button=new TextView(this);button.setTag(label);button.setText(t(label));
+        button.setContentDescription(strings.menuDescription(label));button.setTextColor(0xffeadfcd);
+        button.setGravity(Gravity.CENTER);button.setTextSize(17f*overlayScale);button.setBackgroundColor(0x70443930);
+        FrameLayout.LayoutParams p=new FrameLayout.LayoutParams(overlayPx(68),overlayPx(58),gravity);
+        if((gravity&Gravity.RIGHT)==Gravity.RIGHT)p.rightMargin=overlayPx(horizontal);else p.leftMargin=overlayPx(horizontal);
+        if((gravity&Gravity.BOTTOM)==Gravity.BOTTOM)p.bottomMargin=overlayPx(vertical);else p.topMargin=overlayPx(vertical);
+        button.setOnTouchListener((v,e)->{if(!configured||!surfaceReady||!inputReady)return true;
+            int a=e.getActionMasked();if(a==MotionEvent.ACTION_DOWN){nativeTouchActivity();actionButtons|=mask;}
+            else if(a==MotionEvent.ACTION_UP||a==MotionEvent.ACTION_CANCEL)actionButtons&=~mask;
+            int rc=nativeActions(actionButtons,0,0,0,0);if(rc!=0)fail(t("操作输入不可用"),new Exception(t("错误 ")+rc));return true;});
+        parent.addView(button,p);
+        menuControls.add(button);
+    }
+    /* 显示规则：局外（菜单/选角/启动页）一直显示，因为这些页面游戏自己的列表不认触点；
+     * 局内且处于「触摸操控」时让上游的 TouchControlsView 接管，隐藏这套，避免两套控件叠在一起。
+     * Show rule: always visible outside a run, because the game's own lists ignore touches there; once
+     * inside a run in touch-control mode, upstream's TouchControlsView takes over, so hide these to
+     * avoid stacking two control sets. */
+    private void updateMenuControls(){
+        boolean show=!(inGame&&touchMode);
+        for(View v:menuControls)v.setVisibility(show?View.VISIBLE:View.GONE);
+        if(modeControl!=null)modeControl.setVisibility(View.VISIBLE);
+    }
+    private void refreshModeLabel(){
+        if(modeControl==null)return;
+        modeControl.setText(strings.modeLabel(touchMode));
+        modeControl.setContentDescription(strings.modeDescription(touchMode));
+    }
     private void setTouchMode(boolean on){
         if(!on)cancelFrontendTouch();
         touchMode=on; actionButtons=0; if(inputReady)nativeActions(0,0,0,0,0);
+        refreshModeLabel();
         syncTouchOverlay();
+        updateMenuControls();
     }
     // 对齐 iOS：局外自动隐藏，局内根据触摸/实体手柄来源切换。
     // Match iOS: hide outside a run and switch in-game with touch/physical-controller input.
@@ -557,6 +646,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             JSONObject scene=s.optJSONObject("scene");boolean nextInGame=scene!=null&&scene.optInt("game",0)!=0;
             if(inGame!=nextInGame)cancelFrontendTouch();inGame=nextInGame;
             syncTouchOverlay();
+            updateMenuControls();
             int fpsVisibility=showFps()?View.VISIBLE:View.GONE;
             if(fps.getVisibility()!=fpsVisibility){fps.setVisibility(fpsVisibility);fpsSampler.reset();displayedFps=Double.NaN;}
             long frame=s.getLong("presented_frames");

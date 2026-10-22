@@ -48,10 +48,34 @@ when the EKey or block checksum is computed wrong the game exits as soon as it r
 """
 
 import hashlib
+import os
+import shutil
 from pathlib import Path
 import struct
 import sys
 import zlib
+
+
+def link_or_copy(target, source):
+    """把 output 里的条目指向原件：优先符号链接。
+
+    Windows 上创建符号链接需要「管理员」或「开发者模式」的权限，普通账户会拿到
+    OSError WinError 1314；这时退回硬链接（要求同卷，所以临时目录要放在 RomFS 同一个盘），
+    再不行才复制。逐字节语义与符号链接相同。
+    Point an entry in the output at the original, preferring a symbolic link. Creating one on
+    Windows needs administrator rights or developer mode, and an ordinary account gets
+    OSError WinError 1314; fall back to a hard link (same volume required, so keep the temporary
+    directory on the RomFS volume) and only then to a copy. The bytes are identical either way."""
+    try:
+        target.symlink_to(source)
+        return
+    except OSError:
+        pass
+    try:
+        os.link(source, target)
+        return
+    except OSError:
+        shutil.copyfile(source, target)
 
 
 def die(message):
@@ -93,7 +117,7 @@ def link_tree(source, output, skip=()):
         if entry.is_dir() and not entry.is_symlink():
             link_tree(entry, target)
         else:
-            target.symlink_to(entry.resolve())
+            link_or_copy(target, entry.resolve())
 
 
 def read_manifest(source):
@@ -528,7 +552,7 @@ def rewrite_tvfs(source, output, replacements, prebuilt=None, *, link_unchanged=
     if link_unchanged:
         for entry in data_dir.iterdir():
             if entry.name not in {".build.config", data_name}:
-                (output / "data" / entry.name).symlink_to(entry.resolve())
+                link_or_copy(output / "data" / entry.name, entry.resolve())
     print(f"overlay: {len(updates)} replacement(s), {len(adds)} addition(s), {len(prebuilt_pos)} prebuilt, TVFS rewritten, data={data_name}")
 
 
@@ -539,7 +563,7 @@ def make_overlay(source, output, replacements, prebuilt=None):
     (output / "data").mkdir()
     if not replacements and not prebuilt:
         for entry in (source / "data").iterdir():
-            (output / "data" / entry.name).symlink_to(entry.resolve())
+            link_or_copy(output / "data" / entry.name, entry.resolve())
         print("empty replacement table: linked all source files")
         return
     rewrite_tvfs(source, output, replacements, prebuilt)

@@ -195,10 +195,23 @@ with tempfile.TemporaryDirectory() as t:
         # SHARED_TODO is the existing stock not yet split by mode (both modes share one modified copy); it may only decrease, never increase; a newly added shared layout fails here
         shared=sorted(k[len(LAY):] for k in repl if k.startswith(LAY) and k in MAN and k not in PADLAY and k[len(LAY):] not in PADROOT_KEYS and not any(k.startswith(LAY+d) for _,d in TDIR))
         if shared!=sorted(SHARED_TODO): raise SystemExit('gen_romfs_overlay：两种模式共用的改过的布局与存量清单不一致（多出的要按模式分开：改过的放触屏目录 / 另起新名，原路径留原版）：多 %s，少 %s' % (sorted(set(shared)-set(SHARED_TODO)), sorted(set(SHARED_TODO)-set(shared))))
-        with open(os.path.join(t,tag+'repl.tsv'),'w') as f:
+        with open(os.path.join(t,tag+'repl.tsv'),'w',encoding='utf-8') as f:
             for k,v in repl.items(): f.write(f'{"" if k in MAN else "+"}{k}\t{os.path.join(t,v)}\n')   # 新增路径前加「+」（casc_overlay.py） | New paths are prefixed with "+" (casc_overlay.py)
-        subprocess.run([sys.executable,os.path.join(HERE,'..','..','tools','casc_overlay.py'),romfs,os.path.join(t,tag+'ov'),os.path.join(t,tag+'repl.tsv')]+(['--prebuilt',prebuilt] if prebuilt else []),check=True,stdout=subprocess.DEVNULL)
+        # 子进程的 stdout 以前直接丢掉了：它失败时只剩一个 CalledProcessError，看不到任何原因。
+        # 失败时把它的输出打出来（成功时仍然丢掉）。
+        # The child's stdout used to be discarded: on failure all you got was CalledProcessError with no
+        # reason. Print it when it fails (still discarded on success).
+        r=subprocess.run([sys.executable,os.path.join(HERE,'..','..','tools','casc_overlay.py'),romfs,os.path.join(t,tag+'ov'),os.path.join(t,tag+'repl.tsv')]+(['--prebuilt',prebuilt] if prebuilt else []),stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+        if r.returncode: raise SystemExit('casc_overlay 失败（退出码 %d）：\n%s' % (r.returncode, r.stdout.decode('utf-8','replace')[-4000:]))
         src=os.path.join(t,tag+'ov','data'); new=[n for n in os.listdir(src) if n.endswith('.data') and not os.path.islink(os.path.join(src,n))]
+        if len(new)!=1:
+            # 没有符号链接权限的 Windows（普通账户）上，casc_overlay 把未改动的档案做成了硬链接/复制的
+            # 普通文件，「不是符号链接」就不再等于「新挡」。改按「文件名不在原 RomFS 的 data 里」来认。
+            # On Windows without the symbolic-link privilege (ordinary account) casc_overlay makes the
+            # unchanged archives hard links or plain copies, so "not a symlink" no longer means "new
+            # archive". Identify it by "name not present in the original RomFS data directory" instead.
+            existing=set(os.listdir(os.path.join(romfs,'data')))
+            new=[n for n in os.listdir(src) if n.endswith('.data') and n not in existing]
         assert len(new)==1, new
         shutil.rmtree(dst,ignore_errors=True); os.makedirs(os.path.join(dst,'data'))
         for n in ('.build.config',new[0]): shutil.copyfile(os.path.join(src,n),os.path.join(dst,'data',n))
