@@ -41,9 +41,9 @@
 赞助或背书关系**。仓库中出现的游戏名称仅用于说明用途（描述兼容目标），属于指称性使用。
 
 本仓库**不包含**任何 Blizzard 或任天堂的美术资源：启动图标（Android `mipmap-*`、
-`drawable-nodpi/ic_launcher_foreground.png`、iOS `AppIcon1024.png`）是由
-`dm/android/tools/gen_neutral_icon.py` 用几何图形现场生成的原创占位图，
-可由你随意替换成自己的品牌图。
+`drawable-nodpi/ic_launcher_foreground.png`、iOS `AppIcon1024.png`）是上游项目自带的一张
+AI 生成的原创徽记，生成提示词记录在 `dm/android/artwork/README.md`，其中明确要求
+「不是任何既有游戏图标的复制」。可由你随意替换成自己的品牌图。
 
 ## 许可
 

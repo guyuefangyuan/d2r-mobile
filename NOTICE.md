@@ -46,10 +46,11 @@ property of Blizzard Entertainment, Inc. *Nintendo Switch* is a trademark of Nin
 This project is **not affiliated with, sponsored by or endorsed by** any of them. The game name
 is used only to describe what the framework is compatible with (nominative use).
 
-This repository contains **no** Blizzard or Nintendo artwork. The launcher icons (Android
-`mipmap-*`, `drawable-nodpi/ic_launcher_foreground.png`, iOS `AppIcon1024.png`) are original
-placeholder graphics generated from geometric shapes by
-`dm/android/tools/gen_neutral_icon.py`. Replace them with your own branding freely.
+This repository contains **no** Blizzard or Nintendo artwork. The launcher icon (Android
+`mipmap-*`, `drawable-nodpi/ic_launcher_foreground.png`, iOS `AppIcon1024.png`) is the upstream
+project's own AI-generated original emblem; the prompt it was made from is recorded in
+`dm/android/artwork/README.md` and explicitly asks for "not a copy of an existing game's icon".
+Replace it with your own branding freely.
 
 ## Licence
 
