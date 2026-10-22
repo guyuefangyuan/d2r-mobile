@@ -33,10 +33,19 @@ def tex_slots(key):
     try: return sum(1 for b in json.load(open(f'{LIB}/{key}_b.json'))['bindings'] if b.get('kind') in ('tex', 'samp_tex'))
     except Exception: return 4
 nm = {}
-for ln in open(__file__.rsplit('/', 1)[0] + '/../nvn/shader_map.tsv'):
+# 用 os.path 拼路径：原来按 '/' 切 __file__，在 Windows 上切不开，会拼出
+# ".../tbdr_budget.py/../nvn/shader_map.tsv" 这种不存在的路径，于是 dm/gfx/tests/test_tbdr_budget.py
+# 的 5 个用例全部因为「找不到文件」假失败。
+# Build the path with os.path: splitting __file__ on '/' never splits on Windows and produced
+# ".../tbdr_budget.py/../nvn/shader_map.tsv", which made all five tests in
+# dm/gfx/tests/test_tbdr_budget.py fail for the wrong reason.
+SHADER_MAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, 'nvn', 'shader_map.tsv')
+# 显式 UTF-8：表头是中文，Windows 按 GBK 打开会 UnicodeDecodeError。
+# Explicit UTF-8: the header is Chinese and Windows would open the file as GBK.
+for ln in open(SHADER_MAP, encoding='utf-8'):
     c = ln.rstrip('\n').split('\t')
     if len(c) > 4 and c[0].endswith('.bin'): nm.setdefault(c[3], c[0][:-4])
-for l in open(log, errors='replace'):
+for l in open(log, errors='replace', encoding='utf-8'):
     m = re.search(r'\[pass\] F(\d+) (\w) (\d+) (.*)', l)
     if not m: continue
     f, k, p, r = m.groups()

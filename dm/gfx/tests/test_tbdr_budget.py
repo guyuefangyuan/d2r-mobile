@@ -20,7 +20,7 @@ class BudgetExport(unittest.TestCase):
             p = subprocess.run([sys.executable, str(TOOL), str(log), '700', '170', '--tsv=' + str(out)], capture_output=True, text=True)
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertTrue(out.exists(), '全量通道 TSV 未导出')
-            with out.open() as f:
+            with out.open(encoding='utf-8') as f:
                 return list(csv.DictReader(f, delimiter='\t'))
 
     def test_all_passes_not_only_console_top25(self):

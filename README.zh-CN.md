@@ -1,5 +1,22 @@
 # D2R Mobile
 
+> **关于本仓库 / About this repository**
+>
+> 这是一个**只发布框架源码**的仓库：不含任何游戏数据、游戏可执行文件、解包出来的资源、
+> 打过补丁的模块镜像或打包好的安装包，也**不提供获取游戏文件的任何途径**。
+> 你需要自己合法持有 Switch 版游戏并自行导出。许可证 MIT（上游
+> [dodola/d2r-mobile](https://github.com/dodola/d2r-mobile)）。
+>
+> 范围与版权声明：[中文](NOTICE.zh-CN.md) / [English](NOTICE.md)
+> 测试说明：[中文](TESTING.zh-CN.md) / [English](TESTING.md)
+> Android 移植记录：[中文](docs/ANDROID_PORT.zh-CN.md) / [English](docs/ANDROID_PORT.md)
+>
+> This repository publishes **framework source only**: no game data, no game executable,
+> no extracted assets, no patched module image, no prebuilt package, and no way to obtain
+> the game files. You must own and dump your own copy. MIT licensed, forked from
+> [dodola/d2r-mobile](https://github.com/dodola/d2r-mobile).
+> Scope: [中文](NOTICE.zh-CN.md) / [English](NOTICE.md) — Tests: [中文](TESTING.zh-CN.md) / [English](TESTING.md)
+
 **开源的《暗黑破坏神 II：狱火重生》术士君临 iOS / macOS 兼容层。** 把你自己购买的 Nintendo Switch 版游戏（含「术士君临」资料片）完整带到 iPhone、iPad 和 Mac 上：原版内核原生执行，整套操作为触屏重做，稳定 60 帧，一秒进局。现在也有原生的 macOS 版（第一版）：Apple 芯片的 Mac 上双击启动，键盘、鼠标、手柄都能用。Apple TV 4K（第三代 A15）有社区移植（开发者预览），只在作者的实机上到过职业选择画面，详见下面的设备表。
 
 Android 支持仍处于实验阶段，验证范围单独列在下方。

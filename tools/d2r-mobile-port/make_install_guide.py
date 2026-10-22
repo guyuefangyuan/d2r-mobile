@@ -147,7 +147,7 @@ def cover():
     p('D2R MOBILE  /  ANDROID',M,45,CW-110,10,color=GOLD,bold=True)
     p('暗黑离线安装指南',M,83,CW-90,30,leading=40,color=PARCHMENT,bold=True)
     p('安装 APK，首次选一次资源包，随后自动启动。',M,137,CW-90,12.2,color=PARCHMENT,maxh=42)
-    image(REPO/'dm/android/artwork/d2r-icon-preview.png',W-M-91,56,91,91)
+    image(REPO/'dm/android/artwork/app-icon.png',W-M-91,56,91,91)
     gap=14;card=(CW-gap)/2
     for x,label,name,detail in [(M,'文件 1 · 应用安装包','D2R-Mobile.apk','约 69 MB · 点击它开始安装'),
                                 (M+card+gap,'文件 2 · 完整离线资源包','D2R-Offline-94012.d2rpack','约 9.24 GB · 导入时选择它')]:
@@ -180,7 +180,7 @@ def install():
         p(body,M+34,top+31,left-34,11.5,leading=18,maxh=79)
     x=325;top=197;width=W-M-x
     box(x,top,width,285,WHITE,LINE,radius=12)
-    image(REPO/'dm/android/artwork/d2r-icon-preview.png',x+20,top+22,60,60)
+    image(REPO/'dm/android/artwork/app-icon.png',x+20,top+22,60,60)
     p('D2R Mobile',x+20,top+99,width-40,16,bold=True)
     p('是否安装此应用？',x+20,top+142,width-40,12,color=MUTED)
     box(x+width-91,top+220,72,39,RED,radius=6)

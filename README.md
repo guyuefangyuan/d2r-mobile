@@ -1,5 +1,22 @@
 # D2R Mobile
 
+> **关于本仓库 / About this repository**
+>
+> 这是一个**只发布框架源码**的仓库：不含任何游戏数据、游戏可执行文件、解包出来的资源、
+> 打过补丁的模块镜像或打包好的安装包，也**不提供获取游戏文件的任何途径**。
+> 你需要自己合法持有 Switch 版游戏并自行导出。许可证 MIT（上游
+> [dodola/d2r-mobile](https://github.com/dodola/d2r-mobile)）。
+>
+> 范围与版权声明：[中文](NOTICE.zh-CN.md) / [English](NOTICE.md)
+> 测试说明：[中文](TESTING.zh-CN.md) / [English](TESTING.md)
+> Android 移植记录：[中文](docs/ANDROID_PORT.zh-CN.md) / [English](docs/ANDROID_PORT.md)
+>
+> This repository publishes **framework source only**: no game data, no game executable,
+> no extracted assets, no patched module image, no prebuilt package, and no way to obtain
+> the game files. You must own and dump your own copy. MIT licensed, forked from
+> [dodola/d2r-mobile](https://github.com/dodola/d2r-mobile).
+> Scope: [中文](NOTICE.zh-CN.md) / [English](NOTICE.md) — Tests: [中文](TESTING.zh-CN.md) / [English](TESTING.md)
+
 **An open-source iOS / macOS compatibility layer for Diablo II: Resurrected with the Reign of the Warlock expansion.** It brings the Nintendo Switch release you bought, expansion included, to iPhone, iPad and Mac in full: the original game code runs natively, every control is rebuilt for touch, the frame rate holds at 60 fps, and you are in a game one second after the main menu. There is now a native macOS version as well (first version): on an Apple silicon Mac it starts on double-click and works with keyboard, mouse and gamepad. Apple TV 4K (3rd generation, A15) has a community port (developer preview) that has reached the character-selection screen only on its author's device; see the device table below.
 
 Android support remains experimental; see the separate validation scope below.
